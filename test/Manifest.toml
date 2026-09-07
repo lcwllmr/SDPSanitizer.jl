@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "8f0d8747edb3d5a5bc1843349a5e48d4b27e0c48"
+project_hash = "244728d3cc45f2f136caaa7eddf60e01fd21ef71"
 
 [[deps.AMD]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse_jll"]
@@ -247,6 +247,12 @@ version = "0.3.1"
 git-tree-sha1 = "54b76cbb40d9a0f5368c880725b2f141da77c94f"
 uuid = "a8cc5b0e-0ffa-5ad4-8c14-923d3ee1735f"
 version = "4.2.0"
+
+[[deps.CxxWrap]]
+deps = ["Libdl", "MacroTools", "libcxxwrap_julia_jll"]
+git-tree-sha1 = "f7a997d3959648a818c45dda059a45844300b94d"
+uuid = "1f15a43c-97ca-5a2a-ae31-89f07a497df4"
+version = "0.17.5"
 
 [[deps.Cyclotomics]]
 deps = ["LRUCache", "Memoize", "Primes", "SparseArrays", "Test"]
@@ -869,6 +875,18 @@ git-tree-sha1 = "f7864fb125fc5eb61fa2f2c5738623be0b986edd"
 uuid = "f4f2fc5b-1d94-523c-97ea-2ab488bedf4b"
 version = "300.200.1100+0"
 
+[[deps.SDPA]]
+deps = ["CxxWrap", "LinearAlgebra", "MathOptInterface", "SDPA_jll"]
+git-tree-sha1 = "83dece6a0218e5cdd2d247fc879544f75ec81f82"
+uuid = "b9a10b5b-afa4-512f-a053-bb3d8080febc"
+version = "0.6.1"
+
+[[deps.SDPA_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "OpenBLAS32_jll", "libcxxwrap_julia_jll"]
+git-tree-sha1 = "3c6472c40a01aa291a6d578d73b54799e67033e3"
+uuid = "7fc90fd6-dbef-5a6a-93f8-169f2a2e705b"
+version = "700.300.1900+0"
+
 [[deps.SDPSanitizer]]
 deps = ["LinearAlgebra", "MathOptInterface", "SparseArrays"]
 path = ".."
@@ -1138,6 +1156,12 @@ version = "1.3.1+2"
 deps = ["Artifacts", "Libdl"]
 uuid = "8e850b90-86db-534c-a0d3-1478176c7d93"
 version = "5.15.0+0"
+
+[[deps.libcxxwrap_julia_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "ded0ec008143feba86aceba3cecd27f5625db8d8"
+uuid = "3eaa8342-bff7-56a5-9981-c04077f7cee7"
+version = "0.14.10+1"
 
 [[deps.nghttp2_jll]]
 deps = ["Artifacts", "Libdl"]

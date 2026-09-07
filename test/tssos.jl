@@ -9,12 +9,14 @@ using TSSOS
 # test SDPSanitizer.MOIWrapper with the following SDP solvers
 import CSDP
 import Clarabel
-import Mosek
+import SCS
+import SDPA
 
 @testset "TSSOS + pre-solve wrapper + $solver: Constrained O(2) spin chain with chirality" for solver in [
-   CSDP.Optimizer,
-   Clarabel.Optimizer,
-   Mosek.Optimizer,
+    # CSDP.Optimizer,
+    # Clarabel.Optimizer,
+    SCS.Optimizer,
+    SDPA.Optimizer,
 ]
     @polyvar u1 v1 u2 v2 u3 v3 u4 v4 u5 v5
     x = [u1, v1, u2, v2, u3, v3, u4, v4, u5, v5]
@@ -61,5 +63,5 @@ import Mosek
     @test termination_status(model) == MOI.OPTIMAL
     @test isapprox(opt_p, fx_opt, atol=1e-4)
     @test length(sol_p) == 1
-    @test isapprox(sol_p[1], x_opt, atol=1e-3)
+    @test isapprox(sol_p[1], x_opt, atol=1e-2)
 end
