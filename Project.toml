@@ -1,0 +1,15 @@
+name = "SDPSanitizer"
+uuid = "234b0176-ea36-4e4f-aeb2-cbded6855f42"
+version = "1.0.0-DEV"
+authors = ["Luca Wellmeier"]
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+
+[compat]
+LinearAlgebra = "1.12.0"
+MathOptInterface = ">= 1.52"
+SparseArrays = "1.12.0"
+julia = "1.10.10"
