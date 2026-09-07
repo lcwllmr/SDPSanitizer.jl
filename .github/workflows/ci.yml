@@ -23,6 +23,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1.12'
