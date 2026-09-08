@@ -93,18 +93,79 @@ function presolve!(sdp::SemidefiniteProgram)
         println("Incorporating affine variables into conic data...")
     end
 
-    F_DB = lu(sdp.D[B, :])
-    f_B = F_DB' \ f_indep
+    if sdp.config.verbose
+        println("  Computing sparse LU factorization of basis matrix D[B, :]...")
+    end
+    @time_if sdp.config.verbose F_DB = lu(sdp.D[B, :])
 
-    sdp.recovery_info = AffineRecoveryInfo(F_DB, Vector(sdp.b[B]), sdp.A[B, :], independent_cols, p_orig)
+    if sdp.config.verbose
+        println("  Computing objective modification vector f_B...")
+    end
+    @time_if sdp.config.verbose f_B = F_DB' \ f_indep
+
     D_N = copy(sdp.D[N, :])
+    b_B = Vector(sdp.b[B])
+    A_B = sdp.A[B, :]
+
+    sdp.recovery_info = AffineRecoveryInfo(F_DB, b_B, A_B, independent_cols, p_orig)
     sdp.dual_recovery_info = DualRecoveryInfo(B, N, F_DB, f_indep, D_N, m)
 
-    sdp.b0 = sdp.b0 - dot(sdp.b[B], f_B)
-    W_T = F_DB' \ Matrix(D_N')
-    sdp.b = sparse(sdp.b[N] - W_T' * sdp.b[B])
-    sdp.C = sparse(sdp.C - sdp.A[B, :]' * f_B)
-    sdp.A = sparse(sdp.A[N, :] - W_T' * sdp.A[B, :])
+    sdp.b0 = sdp.b0 - dot(b_B, f_B)
+
+    if sdp.config.verbose
+        println("  Updating conic objective vector C...")
+    end
+    @time_if sdp.config.verbose sdp.C = sparse(sdp.C - A_B' * f_B)
+
+    if sdp.config.verbose
+        println("  Updating RHS vector b...")
+    end
+    @time_if sdp.config.verbose begin
+        v_b = F_DB \ b_B
+        sdp.b = sparse(sdp.b[N] - D_N * v_b)
+    end
+
+    nnz_DN = nnz(D_N)
+    if sdp.config.verbose
+        println("  Updating conic constraint matrix A (D_N nonzeros = $nnz_DN)...")
+    end
+    @time_if sdp.config.verbose begin
+        if nnz_DN == 0
+            if sdp.config.verbose
+                println("    D_N has no nonzeros; non-basis constraints A[N, :] require no affine adjustments.")
+            end
+            sdp.A = sdp.A[N, :]
+        else
+            D_N_T = sparse(D_N')
+            active_rows = findall(c -> D_N_T.colptr[c+1] > D_N_T.colptr[c], 1:length(N))
+            if sdp.config.verbose
+                println("    Found $(length(active_rows)) / $(length(N)) non-basis rows with nonzero affine interactions.")
+            end
+
+            W_I = Int[]
+            W_J = Int[]
+            W_V = Float64[]
+            tol_zero = 1e-14
+
+            for row_idx in active_rows
+                d_col = Vector(D_N_T[:, row_idx])
+                w_col = F_DB' \ d_col
+                for j in 1:p
+                    val = w_col[j]
+                    if abs(val) > tol_zero
+                        push!(W_I, row_idx)
+                        push!(W_J, j)
+                        push!(W_V, val)
+                    end
+                end
+            end
+
+            W = sparse(W_I, W_J, W_V, length(N), p)
+            Delta_A = W * A_B
+            sdp.A = sparse(sdp.A[N, :] - Delta_A)
+        end
+    end
+
     sdp.D = spzeros(Float64, length(N), 0)
     sdp.f = spzeros(Float64, 0)
 end
