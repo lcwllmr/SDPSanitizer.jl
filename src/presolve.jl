@@ -25,13 +25,18 @@ Stores recovery data in `sdp.recovery_info` to reconstruct `z` via [`recover_aff
 """
 function presolve!(sdp::SemidefiniteProgram)
     N_triu = length(sdp.C)
-    n = N_triu > 0 ? round(Int, (sqrt(8 * N_triu + 1) - 1) / 2) : 0
+    dim_desc = if !isempty(sdp.blocks)
+        "$(length(sdp.blocks)) blocks, N_triu = $N_triu"
+    else
+        n = N_triu > 0 ? round(Int, (sqrt(8 * N_triu + 1) - 1) / 2) : 0
+        "n = $n (N_triu = $N_triu)"
+    end
     p = length(sdp.f)
     m = size(sdp.A, 1)
 
     if sdp.config.verbose
         println("Starting presolve...")
-        println("Problem dimensions: n = $n (N_triu = $N_triu), p = $p, m = $m")
+        println("Problem dimensions: $dim_desc, p = $p, m = $m")
     end
 
     if p == 0 || m == 0

@@ -93,6 +93,7 @@ Base.@kwdef mutable struct SemidefiniteProgram
     A::SparseMatrixCSC{Float64, Int} = spzeros(Float64, 0, 0)
     D::SparseMatrixCSC{Float64, Int} = spzeros(Float64, 0, 0)
     b::SparseVector{Float64, Int} = spzeros(Float64, 0)
+    blocks::Vector{Int} = Int[]
 
     config::SanitizerConfig = SanitizerConfig()
     recovery_info::Union{AffineRecoveryInfo, Nothing} = nothing
@@ -110,6 +111,7 @@ function Base.copy(sdp::SemidefiniteProgram)
         A = copy(sdp.A),
         D = copy(sdp.D),
         b = copy(sdp.b),
+        blocks = copy(sdp.blocks),
         config = copy(sdp.config),
         recovery_info = sdp.recovery_info,
         dual_recovery_info = sdp.dual_recovery_info
@@ -117,25 +119,47 @@ function Base.copy(sdp::SemidefiniteProgram)
 end
 
 """
-    as_model(sdp::SemidefiniteProgram)::MOI.ModelLike
+    as_model(sdp::SemidefiniteProgram; blocks::Union{Nothing, Vector{Int}} = nothing)::MOI.ModelLike
 
 Translate `sdp` into a `MathOptInterface.ModelLike` instance.
 
-Conic variables `Z` are constrained to `MOI.ScaledPositiveSemidefiniteConeTriangle(n)`,
-affine variables `z` are unconstrained, the objective sense is set to `sdp.sense`,
+Conic variables `Z` are constrained block-by-block according to `blocks` (or `sdp.blocks`),
+preserving individual blocks via `MOI.ScaledPositiveSemidefiniteConeTriangle(b)`.
+If no block information is provided, infers a single block if possible, or treats
+variables as individual 1x1 scalar blocks.
+Affine variables `z` are unconstrained, the objective sense is set to `sdp.sense`,
 and constraints `A(Z) + D z + b = 0` are added as `A(Z) + D z == -b`.
 """
-function as_model(sdp::SemidefiniteProgram)::MOI.ModelLike
-    # Infer dimensions from matrices
+function as_model(sdp::SemidefiniteProgram; blocks::Union{Nothing, Vector{Int}} = nothing)::MOI.ModelLike
     N_triu = size(sdp.A, 2)
-    n = round(Int, (sqrt(8 * N_triu + 1) - 1) / 2)
     m = size(sdp.A, 1)
     p = size(sdp.D, 2)
 
+    eff_blocks = if blocks !== nothing && !isempty(blocks)
+        blocks
+    elseif !isempty(sdp.blocks)
+        sdp.blocks
+    else
+        det = 8 * N_triu + 1
+        s = round(Int, sqrt(det))
+        if s * s == det && isodd(s)
+            [div(s - 1, 2)]
+        else
+            fill(1, N_triu)
+        end
+    end
+
     model = MOI.Utilities.Model{Float64}()
 
-    # 1. Variables: Z in ScaledPositiveSemidefiniteConeTriangle, z unconstrained
-    Z_vars, _ = MOI.add_constrained_variables(model, MOI.ScaledPositiveSemidefiniteConeTriangle(n))
+    # 1. Variables: Z in ScaledPositiveSemidefiniteConeTriangle per block, z unconstrained
+    Z_vars = MOI.VariableIndex[]
+    for b in eff_blocks
+        if b > 0
+            vars, _ = MOI.add_constrained_variables(model, MOI.ScaledPositiveSemidefiniteConeTriangle(b))
+            append!(Z_vars, vars)
+        end
+    end
+    @assert length(Z_vars) == N_triu "Sum of block triangular dimensions ($(length(Z_vars))) does not match columns of A ($N_triu)"
     z_vars = MOI.add_variables(model, p)
 
     # 2. Objective: ⟨C, Z⟩ + fᵀ z + b₀
