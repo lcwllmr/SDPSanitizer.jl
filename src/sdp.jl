@@ -1,13 +1,17 @@
 """
-    SanitizerConfig(; verbose::Bool = false)
+    SanitizerConfig(; verbose::Bool = false, eliminate_free_variables::Bool = true, eliminate_redundant_constraints::Bool = false)
 
 Configuration options for presolving SDPs in `SDPSanitizer`.
 
 # Fields
 - `verbose::Bool`: Print logging and timing diagnostics during presolve (default: `false`).
+- `eliminate_free_variables::Bool`: Detect and eliminate free affine variables `z` (default: `true`).
+- `eliminate_redundant_constraints::Bool`: Detect and eliminate linearly redundant conic equality constraints (default: `false`).
 """
 Base.@kwdef mutable struct SanitizerConfig
     verbose::Bool = false
+    eliminate_free_variables::Bool = true
+    eliminate_redundant_constraints::Bool = false
 end
 
 """
@@ -42,6 +46,7 @@ Internal recovery data stored in `SemidefiniteProgram` to reconstruct eliminated
 - `f_indep::Vector{Float64}`: Objective coefficients of independent affine variables.
 - `D_N::SparseMatrixCSC{Float64, Int}`: Non-basis row slice of `D`.
 - `m::Int`: Total original number of constraints.
+- `conic_basis_rows::Vector{Int}`: Indices of retained conic equality constraints (subset of `1:length(N)`, or `1:m` if no affine vars).
 """
 struct DualRecoveryInfo
     B::Vector{Int}
@@ -50,6 +55,10 @@ struct DualRecoveryInfo
     f_indep::Vector{Float64}
     D_N::SparseMatrixCSC{Float64, Int}
     m::Int
+    conic_basis_rows::Vector{Int}
+
+    DualRecoveryInfo(B, N, F_DB, f_indep, D_N, m, conic_basis_rows::Vector{Int} = Int[]) =
+        new(B, N, F_DB, f_indep, D_N, m, conic_basis_rows)
 end
 
 """
@@ -100,7 +109,11 @@ Base.@kwdef mutable struct SemidefiniteProgram
     dual_recovery_info::Union{DualRecoveryInfo, Nothing} = nothing
 end
 
-Base.copy(cfg::SanitizerConfig) = SanitizerConfig(verbose = cfg.verbose)
+Base.copy(cfg::SanitizerConfig) = SanitizerConfig(
+    verbose = cfg.verbose,
+    eliminate_free_variables = cfg.eliminate_free_variables,
+    eliminate_redundant_constraints = cfg.eliminate_redundant_constraints
+)
 
 function Base.copy(sdp::SemidefiniteProgram)
     return SemidefiniteProgram(

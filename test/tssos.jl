@@ -58,7 +58,7 @@ import SDPA
              (sqrt(6)-sqrt(2))/4, (sqrt(6)+sqrt(2))/4]
     fx_opt = 11 - 3 * (sqrt(6) + sqrt(2))
 
-    model = Model(() -> SDPSanitizer.MOIWrapper(solver; presolve=true, sieve=true, verbose=true))
+    model = Model(() -> SDPSanitizer.MOIWrapper(solver; presolve=true, eliminate_free_variables=true, eliminate_redundant_constraints=true, sieve=true, verbose=true))
     opt_p, sol_p, data_p = cs_tssos(pop, x, 1; numeq=length(equalities), TS="block", CS="MF", QUIET=false, solution=true, solution_mode="moment", model=model)
     @test termination_status(model) == MOI.OPTIMAL
     @test isapprox(opt_p, fx_opt, atol=1e-4)
