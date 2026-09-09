@@ -13,8 +13,12 @@ for the original formulation.
 mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
     inner::O
     presolve::Bool
+    sieve::Bool
     verbose::Bool
     silent::Bool
+
+    sieve_infeasible::Bool
+    sieve_active_con_idx::Union{Nothing, Vector{Int}}
 
     model::MOI.Utilities.UniversalFallback{MOI.Utilities.Model{Float64}}
     sdp::Union{Nothing, SemidefiniteProgram}
@@ -37,13 +41,14 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
     # Inner model map
     inner_var_map::Dict{MOI.VariableIndex, MOI.VariableIndex}
     inner_psd_con_map::Dict{MOI.ConstraintIndex, MOI.ConstraintIndex}
+    inner_affine_con_map::Dict{MOI.ConstraintIndex, MOI.ConstraintIndex}
     inner_presolved_con::Union{Nothing, MOI.ConstraintIndex}
 
     # Cached solutions
     recovered_affine_primal::Vector{Float64}
     recovered_dual::Vector{Float64}
 
-    function MOIWrapper(inner::O; presolve::Bool = true, verbose::Bool = false) where {O <: MOI.ModelLike}
+    function MOIWrapper(inner::O; presolve::Bool = true, sieve::Bool = true, verbose::Bool = false) where {O <: MOI.ModelLike}
         bridged_inner = if inner isa MOI.Bridges.AbstractBridgeOptimizer
             inner
         else
@@ -59,8 +64,11 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
         return new{typeof(bridged_inner)}(
             bridged_inner,
             presolve,
+            sieve,
             verbose,
             silent,
+            false, # sieve_infeasible
+            nothing, # sieve_active_con_idx
             MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}()),
             nothing,
             MOI.VariableIndex[],
@@ -75,6 +83,7 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
             Dict{MOI.ConstraintIndex, Int}(),
             0,
             Dict{MOI.VariableIndex, MOI.VariableIndex}(),
+            Dict{MOI.ConstraintIndex, MOI.ConstraintIndex}(),
             Dict{MOI.ConstraintIndex, MOI.ConstraintIndex}(),
             nothing,
             Float64[],
@@ -105,6 +114,7 @@ function MOI.empty!(opt::MOIWrapper)
     opt.m_total = 0
     empty!(opt.inner_var_map)
     empty!(opt.inner_psd_con_map)
+    empty!(opt.inner_affine_con_map)
     opt.inner_presolved_con = nothing
     empty!(opt.recovered_affine_primal)
     empty!(opt.recovered_dual)
@@ -139,6 +149,8 @@ MOI.set(opt::MOIWrapper, attr::MOI.AbstractConstraintAttribute, c::MOI.Constrain
 function MOI.set(opt::MOIWrapper, attr::MOI.RawOptimizerAttribute, val)
     if attr.name == "presolve"
         opt.presolve = Bool(val)
+    elseif attr.name == "sieve"
+        opt.sieve = Bool(val)
     elseif attr.name == "verbose"
         opt.verbose = Bool(val)
     else
@@ -177,6 +189,7 @@ function MOI.optimize!(opt::MOIWrapper)
     empty!(opt.recovered_dual)
 
     conic_var_set = Set{MOI.VariableIndex}()
+    blocks = Int[]
 
     for (F, S) in MOI.get(opt.model, MOI.ListOfConstraintTypesPresent())
         if S <: Union{MOI.PositiveSemidefiniteConeTriangle, MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}}
@@ -186,11 +199,16 @@ function MOI.optimize!(opt::MOIWrapper)
                 push!(opt.psd_con_indices, (c, dim))
                 f = MOI.get(opt.model, MOI.ConstraintFunction(), c)
                 vars = f isa MOI.VectorOfVariables ? f.variables : [t.scalar_term.variable for t in f.terms]
+                added = false
                 for v in vars
                     if !(v in conic_var_set)
                         push!(opt.psd_vars, v)
                         push!(conic_var_set, v)
+                        added = true
                     end
+                end
+                if added
+                    push!(blocks, round(Int, (sqrt(8 * dim + 1) - 1) / 2))
                 end
             end
         elseif S <: MOI.Nonnegatives
@@ -198,12 +216,15 @@ function MOI.optimize!(opt::MOIWrapper)
                 push!(opt.nonneg_con_indices, c)
                 f = MOI.get(opt.model, MOI.ConstraintFunction(), c)
                 vars = f isa MOI.VectorOfVariables ? f.variables : [t.scalar_term.variable for t in f.terms]
+                count = 0
                 for v in vars
                     if !(v in conic_var_set)
                         push!(opt.psd_vars, v)
                         push!(conic_var_set, v)
+                        count += 1
                     end
                 end
+                append!(blocks, ones(Int, count))
             end
         elseif S <: MOI.GreaterThan
             for c in MOI.get(opt.model, MOI.ListOfConstraintIndices{F, S}())
@@ -215,6 +236,7 @@ function MOI.optimize!(opt::MOIWrapper)
                     if !(v in conic_var_set)
                         push!(opt.psd_vars, v)
                         push!(conic_var_set, v)
+                        push!(blocks, 1)
                     end
                 end
             end
@@ -265,14 +287,19 @@ function MOI.optimize!(opt::MOIWrapper)
     opt.m_total = row_offset
     m = opt.m_total
 
-    # Check if presolve should be skipped
-    if !opt.presolve || p == 0
+    # Check if both presolve and sieve should be skipped
+    if (!opt.presolve || p == 0) && !opt.sieve
         if opt.verbose
-            println("[SDPSanitizer.MOIWrapper] Presolve not active or no free variables ($p); passing directly to inner solver.")
+            println("[SDPSanitizer.MOIWrapper] Presolve not active or no free variables ($p), and sieve not active; passing directly to inner solver.")
         end
         index_map = MOI.copy_to(opt.inner, opt.model)
         for v in all_vars
             opt.inner_var_map[v] = index_map[v]
+        end
+        for c in opt.affine_con_indices
+            if haskey(index_map, c)
+                opt.inner_affine_con_map[c] = index_map[c]
+            end
         end
         MOI.optimize!(opt.inner)
         return
@@ -359,6 +386,7 @@ function MOI.optimize!(opt::MOIWrapper)
         A = A,
         D = D,
         b = b,
+        blocks = blocks,
         config = SanitizerConfig(verbose = opt.verbose)
     )
 
@@ -368,7 +396,24 @@ function MOI.optimize!(opt::MOIWrapper)
         println("[SDPSanitizer.MOIWrapper] Before presolve: b0 = ", sdp.b0)
     end
     opt.sdp = sdp
-    presolve!(sdp)
+    if opt.presolve
+        presolve!(sdp)
+    end
+    if opt.sieve
+        try
+            opt.sieve_active_con_idx = sieve!(sdp)
+        catch e
+            if e isa ErrorException && e.msg == "INFEASIBLE"
+                opt.sieve_infeasible = true
+                if opt.verbose
+                    println("[SDPSanitizer.MOIWrapper] Sieve-SDP detected infeasibility.")
+                end
+                return
+            else
+                rethrow(e)
+            end
+        end
+    end
     if opt.verbose
         println("[SDPSanitizer.MOIWrapper] After presolve: C nz = ", length(sdp.C.nzind))
         println("[SDPSanitizer.MOIWrapper] After presolve: b0 = ", sdp.b0)
@@ -469,27 +514,57 @@ function MOI.optimize!(opt::MOIWrapper)
     end
 
     dual_status = MOI.get(opt.inner, MOI.DualStatus())
-    if dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
-        y_presolved = if opt.inner_presolved_con !== nothing
+    if dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT) || opt.inner_presolved_con === nothing
+        y_presolved = if opt.inner_presolved_con !== nothing && dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
             MOI.get(opt.inner, MOI.ConstraintDual(), opt.inner_presolved_con)
         else
             Float64[]
+        end
+        if opt.sieve && opt.sieve_active_con_idx !== nothing
+            m_orig_affine = isempty(opt.affine_con_dims) ? 0 : sum(opt.affine_con_dims)
+            m_presolve = opt.sdp.dual_recovery_info !== nothing ? length(opt.sdp.dual_recovery_info.N) : m_orig_affine
+            # Just to be safe if maximum is 0
+            m_presolve = max(m_presolve, 0)
+            if m_presolve > 0
+                n_active = length(opt.sieve_active_con_idx)
+                if n_active < m_presolve
+                    if opt.verbose
+                        @warn "Sieve-SDP found redundant constraints. The exact dual problem might not attain its optimum (asymptotic). Duals for deleted constraints are zero-padded."
+                    end
+                end
+                y_padded = zeros(Float64, m_presolve)
+                for i in 1:n_active
+                    if dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
+                        y_padded[opt.sieve_active_con_idx[i]] = y_presolved[i]
+                    end
+                end
+                y_presolved = y_padded
+            end
         end
         opt.recovered_dual = recover_dual_solution(sdp, y_presolved)
     end
 end
 
 # Attribute queries
-MOI.get(opt::MOIWrapper, attr::MOI.TerminationStatus) = MOI.get(opt.inner, attr)
-MOI.get(opt::MOIWrapper, attr::MOI.PrimalStatus) = MOI.get(opt.inner, attr)
-MOI.get(opt::MOIWrapper, attr::MOI.DualStatus) = MOI.get(opt.inner, attr)
-MOI.get(opt::MOIWrapper, attr::MOI.ObjectiveValue) = MOI.get(opt.inner, attr)
-MOI.get(opt::MOIWrapper, attr::MOI.RawStatusString) = MOI.get(opt.inner, attr)
+MOI.get(opt::MOIWrapper, attr::MOI.TerminationStatus) = opt.sieve_infeasible ? MOI.INFEASIBLE : MOI.get(opt.inner, attr)
+MOI.get(opt::MOIWrapper, attr::MOI.PrimalStatus) = opt.sieve_infeasible ? MOI.NO_SOLUTION : MOI.get(opt.inner, attr)
+function MOI.get(opt::MOIWrapper, attr::MOI.DualStatus)
+    if opt.sieve_infeasible
+        return MOI.NO_SOLUTION
+    end
+    inner_st = MOI.get(opt.inner, attr)
+    if inner_st == MOI.NO_SOLUTION && opt.inner_presolved_con === nothing && MOI.get(opt.inner, MOI.PrimalStatus()) in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
+        return MOI.FEASIBLE_POINT
+    end
+    return inner_st
+end
+MOI.get(opt::MOIWrapper, attr::MOI.ObjectiveValue) = opt.sieve_infeasible ? NaN : MOI.get(opt.inner, attr)
+MOI.get(opt::MOIWrapper, attr::MOI.RawStatusString) = opt.sieve_infeasible ? "Sieve-SDP found infeasible" : MOI.get(opt.inner, attr)
 MOI.get(opt::MOIWrapper, attr::MOI.SolveTimeSec) = MOI.get(opt.inner, attr)
 MOI.get(opt::MOIWrapper, attr::MOI.Silent) = opt.silent
 
 function MOI.get(opt::MOIWrapper, attr::MOI.VariablePrimal, v::MOI.VariableIndex)
-    if !opt.presolve || isempty(opt.affine_vars)
+    if (!opt.presolve || isempty(opt.affine_vars)) && !opt.sieve
         return MOI.get(opt.inner, attr, opt.inner_var_map[v])
     end
     if haskey(opt.psd_var_to_col, v)
@@ -503,8 +578,9 @@ function MOI.get(opt::MOIWrapper, attr::MOI.VariablePrimal, v::MOI.VariableIndex
 end
 
 function MOI.get(opt::MOIWrapper, attr::MOI.ConstraintDual, c::MOI.ConstraintIndex)
-    if !opt.presolve || isempty(opt.affine_vars)
-        return MOI.get(opt.inner, attr, c)
+    if (!opt.presolve || isempty(opt.affine_vars)) && !opt.sieve
+        inner_ci = get(opt.inner_affine_con_map, c, c)
+        return MOI.get(opt.inner, attr, inner_ci)
     end
     offset = opt.con_row_offsets[c]
     idx = findfirst(==(c), opt.affine_con_indices)
