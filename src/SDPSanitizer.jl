@@ -17,6 +17,6 @@ include("synth.jl")
 export synthetic_sdp
 
 include("wrapper.jl")
-export MOIWrapper
+export MOIWrapper, get_last_inner_solve_time
 
 end

@@ -51,6 +51,10 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
     recovered_affine_primal::Vector{Float64}
     recovered_dual::Vector{Float64}
 
+    # Timings
+    solve_time::Float64
+    inner_solve_time::Float64
+
     function MOIWrapper(inner::O;
         presolve::Bool = true,
         eliminate_free_variables::Bool = true,
@@ -99,10 +103,16 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
             Dict{MOI.ConstraintIndex, MOI.ConstraintIndex}(),
             nothing,
             Float64[],
-            Float64[]
+            Float64[],
+            0.0, # solve_time
+            0.0  # inner_solve_time
         )
     end
 end
+
+const LAST_INNER_SOLVE_TIME = Ref{Float64}(0.0)
+
+get_last_inner_solve_time() = LAST_INNER_SOLVE_TIME[]
 
 MOIWrapper(optimizer_constructor::Function; kwargs...) = MOIWrapper(optimizer_constructor(); kwargs...)
 MOIWrapper(optimizer_type::Type{<:MOI.ModelLike}; kwargs...) = MOIWrapper(optimizer_type(); kwargs...)
@@ -187,6 +197,7 @@ end
 
 # Optimization and presolve pipeline
 function MOI.optimize!(opt::MOIWrapper)
+    t_start = time()
     # 1. Classify variables: Conic PSD vs free affine variables
     all_vars = MOI.get(opt.model, MOI.ListOfVariableIndices())
     psd_var_set = Set{MOI.VariableIndex}()
@@ -427,6 +438,10 @@ function MOI.optimize!(opt::MOIWrapper)
             if e isa ErrorException && e.msg == "INFEASIBLE"
                 opt.infeasible = true
                 opt.infeasible_msg = "Presolve detected infeasibility in redundant constraints"
+                opt.solve_time = time() - t_start
+                opt.inner_solve_time = 0.0
+                LAST_INNER_SOLVE_TIME[] = 0.0
+                LAST_TOTAL_SOLVE_TIME[] = opt.solve_time
                 if opt.verbose
                     println("[SDPSanitizer.MOIWrapper] $(opt.infeasible_msg)")
                 end
@@ -444,6 +459,10 @@ function MOI.optimize!(opt::MOIWrapper)
             if e isa ErrorException && e.msg == "INFEASIBLE"
                 opt.infeasible = true
                 opt.infeasible_msg = "Sieve-SDP detected infeasibility"
+                opt.solve_time = time() - t_start
+                opt.inner_solve_time = 0.0
+                LAST_INNER_SOLVE_TIME[] = 0.0
+                LAST_TOTAL_SOLVE_TIME[] = opt.solve_time
                 if opt.verbose
                     println("[SDPSanitizer.MOIWrapper] $(opt.infeasible_msg)")
                 end
@@ -543,7 +562,10 @@ function MOI.optimize!(opt::MOIWrapper)
     if opt.verbose
         println("[SDPSanitizer.MOIWrapper] Solving reduced problem with inner solver...")
     end
+    t_inner_start = time()
     MOI.optimize!(opt.inner)
+    opt.inner_solve_time = time() - t_inner_start
+    LAST_INNER_SOLVE_TIME[] = opt.inner_solve_time
 
     # 7. Solution recovery
     status = MOI.get(opt.inner, MOI.PrimalStatus())
@@ -578,6 +600,11 @@ function MOI.optimize!(opt::MOIWrapper)
         end
         opt.recovered_dual = recover_dual_solution(sdp, y_presolved)
     end
+    opt.solve_time = time() - t_start
+    if opt.verbose
+        presolve_time = max(0.0, opt.solve_time - opt.inner_solve_time)
+        println("[SDPSanitizer.MOIWrapper] SDP presolve time: ", round(presolve_time, digits=4), " s, SDP solve time: ", round(opt.inner_solve_time, digits=4), " s")
+    end
 end
 
 # Attribute queries
@@ -595,7 +622,7 @@ function MOI.get(opt::MOIWrapper, attr::MOI.DualStatus)
 end
 MOI.get(opt::MOIWrapper, attr::MOI.ObjectiveValue) = opt.infeasible ? NaN : MOI.get(opt.inner, attr)
 MOI.get(opt::MOIWrapper, attr::MOI.RawStatusString) = opt.infeasible ? opt.infeasible_msg : MOI.get(opt.inner, attr)
-MOI.get(opt::MOIWrapper, attr::MOI.SolveTimeSec) = MOI.get(opt.inner, attr)
+MOI.get(opt::MOIWrapper, attr::MOI.SolveTimeSec) = opt.solve_time > 0.0 ? opt.solve_time : MOI.get(opt.inner, attr)
 MOI.get(opt::MOIWrapper, attr::MOI.Silent) = opt.silent
 
 function MOI.get(opt::MOIWrapper, attr::MOI.VariablePrimal, v::MOI.VariableIndex)
