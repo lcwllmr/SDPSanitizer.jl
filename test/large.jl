@@ -183,7 +183,7 @@ end
     # 4. Step 4: Full unreduced pipeline through MOIWrapper
     orig_sdp = generate_reducible_large_sdp()
     orig_model = as_model(orig_sdp)
-    wrapper_opt = MOIWrapper(Clarabel.Optimizer, presolve=true, sieve=true)
+    wrapper_opt = MOIWrapper(Clarabel.Optimizer, presolve=true, facial_reduction=true)
     MOI.set(wrapper_opt, MOI.Silent(), true)
     MOI.copy_to(wrapper_opt, orig_model)
     MOI.optimize!(wrapper_opt)

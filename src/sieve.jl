@@ -22,11 +22,15 @@ function get_unflatten_map(blocks::Vector{Int})
 end
 
 """
-    sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
+    sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12, only_detect_infeasibility::Bool=false)
 
-Apply the Sieve-SDP facial reduction algorithm to the given `sdp`.
+Apply the Sieve-SDP algorithm to the given `sdp`.
+If `only_detect_infeasibility` is `true`, detects contradictory constraints and throws
+`ErrorException("INFEASIBLE")` if found, but leaves `sdp.A`, `sdp.D`, and `sdp.b` unaltered if consistent.
+If `only_detect_infeasibility` is `false`, performs facial reduction by eliminating inactive variables and
+dropping redundant constraints.
 """
-function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
+function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12, only_detect_infeasibility::Bool=false)
     p = size(sdp.D, 2)
     if isempty(sdp.blocks)
         # Sieve cannot proceed without block structure.
@@ -54,11 +58,17 @@ function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
     iter = 0
 
     if sdp.config.verbose
-        println("[Sieve] Starting Sieve-SDP on $n variables, $m constraints.")
+        mode_str = only_detect_infeasibility ? "Infeasibility Detection" : "Facial Reduction"
+        println("[Sieve] Starting Sieve-SDP ($mode_str) on $n variables, $m constraints.")
     end
 
     D_T = sparse(sdp.D')
     
+    # Preallocated reusable buffers to avoid allocations inside the constraint loop
+    I_aux = falses(n)
+    touched = Int[]
+    pos_in_idx = zeros(Int, n)
+
     while undone && iter < max_iter
         undone = false
         iter += 1
@@ -81,25 +91,36 @@ function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
                 continue
             end
 
-            I_aux = falses(n)
             for ptr in nzrange(A_T, c)
                 k = rows_A_T[ptr]
                 val = vals_A_T[ptr]
                 if abs(val) > tol
                     i, j = k_to_ij[k]
                     if active_rows[i] && active_rows[j]
-                        I_aux[i] = true
-                        I_aux[j] = true
+                        if !I_aux[i]
+                            I_aux[i] = true
+                            push!(touched, i)
+                        end
+                        if !I_aux[j]
+                            I_aux[j] = true
+                            push!(touched, j)
+                        end
                     end
                 end
             end
 
-            idx = findall(I_aux)
+            sort!(touched)
+            idx = touched
             nnz_sub = length(idx)
             
             b_c = sdp.b[c]
 
             if nnz_sub == 0
+                for item in idx
+                    I_aux[item] = false
+                end
+                empty!(touched)
+
                 if abs(b_c) > tol
                     error("INFEASIBLE") 
                 else
@@ -109,6 +130,10 @@ function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
                 continue
             end
 
+            for (pos, item) in enumerate(idx)
+                pos_in_idx[item] = pos
+            end
+
             At = zeros(Float64, nnz_sub, nnz_sub)
             for ptr in nzrange(A_T, c)
                 k = rows_A_T[ptr]
@@ -116,8 +141,8 @@ function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
                 if abs(val) > tol
                     i, j = k_to_ij[k]
                     if active_rows[i] && active_rows[j]
-                        i_sub = findfirst(==(i), idx)
-                        j_sub = findfirst(==(j), idx)
+                        i_sub = pos_in_idx[i]
+                        j_sub = pos_in_idx[j]
                         actual_val = (i == j) ? val : val / sqrt(2.0)
                         At[i_sub, j_sub] = actual_val
                         At[j_sub, i_sub] = actual_val
@@ -145,11 +170,25 @@ function sieve!(sdp::SemidefiniteProgram; max_iter::Int=10, tol::Float64=1e-12)
                     undone = true
                 end
             end
+
+            # Reset lookup buffers for this constraint
+            for item in idx
+                I_aux[item] = false
+                pos_in_idx[item] = 0
+            end
+            empty!(touched)
         end
     end
 
     if sdp.config.verbose
         println("[Sieve] Finished after $iter iterations. Active variables: $(sum(active_rows)) / $n.")
+    end
+
+    if only_detect_infeasibility
+        if sdp.config.verbose
+            println("[Sieve] Infeasibility check passed; problem is consistent. SDP left intact.")
+        end
+        return collect(1:m)
     end
 
     active_con_idx = findall(undeleted_constraints)
