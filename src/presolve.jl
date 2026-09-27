@@ -8,6 +8,82 @@ macro time_if(cond, expr)
     end
 end
 
+function get_effective_threads(config_threads::Int)::Tuple{Int, Int}
+    if config_threads <= 0
+        j_threads = max(1, min(Threads.nthreads(), 8))
+        spqr_threads = max(1, min(Sys.CPU_THREADS, 8))
+        return j_threads, spqr_threads
+    else
+        j_threads = max(1, min(config_threads, Threads.nthreads()))
+        spqr_threads = max(1, min(config_threads, Sys.CPU_THREADS))
+        return j_threads, spqr_threads
+    end
+end
+
+function configure_spqr_threads!(spqr_threads::Int)
+    ss = get(Base.loaded_modules, Base.PkgId(Base.UUID("4607b0f0-06f3-5cda-b6b1-a6196a1729e9"), "SuiteSparse"), nothing)
+    if ss !== nothing && isdefined(ss, :SPQR) && isdefined(ss.SPQR, :set_spqr_nthreads)
+        try
+            ss.SPQR.set_spqr_nthreads(spqr_threads)
+        catch
+        end
+    end
+end
+
+function _solve_w_chunk!(
+    I_t::Vector{Int},
+    J_t::Vector{Int},
+    V_t::Vector{Float64},
+    k_range::UnitRange{Int},
+    active_rows::Vector{Int},
+    D_N_T::SparseMatrixCSC{Float64, Int},
+    F_DB,
+    p::Int,
+    tol_zero::Float64
+)
+    F_task = copy(F_DB)
+    w_buf = zeros(Float64, p)
+    d_buf = zeros(Float64, p)
+
+    for k in k_range
+        row_idx = active_rows[k]
+        for ptr in nzrange(D_N_T, row_idx)
+            d_buf[D_N_T.rowval[ptr]] = D_N_T.nzval[ptr]
+        end
+        ldiv!(w_buf, F_task', d_buf)
+        for ptr in nzrange(D_N_T, row_idx)
+            d_buf[D_N_T.rowval[ptr]] = 0.0
+        end
+        for j in 1:p
+            val = w_buf[j]
+            if abs(val) > tol_zero
+                push!(I_t, row_idx)
+                push!(J_t, j)
+                push!(V_t, val)
+            end
+        end
+    end
+end
+
+function _compute_a_chunk!(
+    A_chunks::Vector{SparseMatrixCSC{Float64, Int}},
+    t_idx::Int,
+    r_range::UnitRange{Int},
+    W::SparseMatrixCSC{Float64, Int},
+    A_N_full::SparseMatrixCSC{Float64, Int},
+    A_B::SparseMatrixCSC{Float64, Int}
+)
+    W_sub = W[r_range, :]
+    A_orig_sub = A_N_full[r_range, :]
+    if nnz(W_sub) == 0
+        A_chunks[t_idx] = A_orig_sub
+    else
+        Delta_sub = W_sub * A_B
+        A_chunks[t_idx] = dropzeros!(A_orig_sub - Delta_sub)
+    end
+end
+
+
 """
     presolve!(sdp::SemidefiniteProgram)
 
@@ -27,6 +103,7 @@ Follows the reduction method of Kobayashi, Nakata, and Kojima (2007) modernized 
 Controlled by `sdp.config`:
 - `eliminate_free_variables`: If `true`, eliminates free affine variables `z` (default: `true`).
 - `eliminate_redundant_constraints`: If `true`, detects and drops linearly redundant constraints in `A` (default: `false`).
+- `num_threads`: Number of worker threads. `0` auto-selects up to min(available, 8) (default: `0`).
 
 Stores recovery data in `sdp.recovery_info` and `sdp.dual_recovery_info`.
 """
@@ -41,9 +118,13 @@ function presolve!(sdp::SemidefiniteProgram)
     p = length(sdp.f)
     m = size(sdp.A, 1)
 
+    j_threads, spqr_threads = get_effective_threads(sdp.config.num_threads)
+    configure_spqr_threads!(spqr_threads)
+
     if sdp.config.verbose
         println("Starting presolve...")
         println("Problem dimensions: $dim_desc, p = $p, m = $m")
+        println("Worker threads: Julia = $j_threads, SPQR = $spqr_threads")
         println("eliminate_free_variables: $(sdp.config.eliminate_free_variables), eliminate_redundant_constraints: $(sdp.config.eliminate_redundant_constraints)")
     end
 
@@ -63,11 +144,11 @@ function presolve!(sdp::SemidefiniteProgram)
             println("Stage 1 - Step 1: Performing QR to find linearly independent columns in affine constraint matrix D...")
         end
         @time_if sdp.config.verbose F1 = qr(sdp.D)
-        R1 = F1.R
+        R1 = F1.R::SparseMatrixCSC{Float64, Int}
         diag_R1 = abs.(diag(R1))
         tol1 = eps(Float64) * max(m, p) * (isempty(diag_R1) ? 1.0 : maximum(diag_R1))
         nzdiag1 = findall(>(tol1), diag_R1)
-        independent_cols = F1.pcol[nzdiag1]
+        independent_cols = (F1.pcol::Vector{Int})[nzdiag1]
         p_rank = length(independent_cols)
 
         if sdp.config.verbose
@@ -84,20 +165,25 @@ function presolve!(sdp::SemidefiniteProgram)
             sdp.dual_recovery_info = DualRecoveryInfo(Int[], collect(1:m), lu(zeros(Float64, 0, 0)), Float64[], spzeros(Float64, m, 0), m, Int[])
         else
             p_orig = p
-            D_orig_indep = sdp.D[:, independent_cols]
-            f_indep = Vector(sdp.f[independent_cols])
+            if p_rank == p && independent_cols == collect(1:p)
+                f_indep = Vector(sdp.f)
+            else
+                D_orig_indep = sdp.D[:, independent_cols]
+                f_indep = Vector(sdp.f[independent_cols])
 
-            sdp.D = copy(D_orig_indep)
-            sdp.f = sparse(f_indep)
-            p = p_rank
+                sdp.D = copy(D_orig_indep)
+                sdp.f = sparse(f_indep)
+                p = p_rank
+            end
 
             ######## STEP 2: Extract basis from affine constraint matrix rows ########
             if sdp.config.verbose
                 println("Stage 1 - Step 2: Performing QR to extract row space basis of affine constraint matrix D...")
             end
             @time_if sdp.config.verbose F2 = qr(sparse(sdp.D'))
-            B = F2.pcol[1:p]
-            N = F2.pcol[p+1:end]
+            pcol2 = F2.pcol::Vector{Int}
+            B = pcol2[1:p]
+            N = pcol2[p+1:end]
 
             if sdp.config.verbose
                 println("Extracted basis rows B of size $(length(B)) and non-basis rows N of size $(length(N)).")
@@ -142,7 +228,7 @@ function presolve!(sdp::SemidefiniteProgram)
 
             nnz_DN = nnz(D_N)
             if sdp.config.verbose
-                println("  Updating conic constraint matrix A (D_N nonzeros = $nnz_DN)...")
+                println("  Updating conic constraint matrix A (D_N nonzeros = $nnz_DN, threads = $j_threads)...")
             end
             @time_if sdp.config.verbose begin
                 if nnz_DN == 0
@@ -153,31 +239,70 @@ function presolve!(sdp::SemidefiniteProgram)
                 else
                     D_N_T = sparse(D_N')
                     active_rows = findall(c -> D_N_T.colptr[c+1] > D_N_T.colptr[c], 1:length(N))
+                    n_active = length(active_rows)
                     if sdp.config.verbose
-                        println("    Found $(length(active_rows)) / $(length(N)) non-basis rows with nonzero affine interactions.")
+                        println("    Found $n_active / $(length(N)) non-basis rows with nonzero affine interactions.")
                     end
 
-                    W_I = Int[]
-                    W_J = Int[]
-                    W_V = Float64[]
                     tol_zero = 1e-14
+                    n_tasks_w = min(j_threads, n_active)
 
-                    for row_idx in active_rows
-                        d_col = Vector(D_N_T[:, row_idx])
-                        w_col = F_DB' \ d_col
-                        for j in 1:p
-                            val = w_col[j]
-                            if abs(val) > tol_zero
-                                push!(W_I, row_idx)
-                                push!(W_J, j)
-                                push!(W_V, val)
+                    if n_tasks_w <= 1
+                        W_I = Int[]
+                        W_J = Int[]
+                        W_V = Float64[]
+                        _solve_w_chunk!(W_I, W_J, W_V, 1:n_active, active_rows, D_N_T, F_DB, p, tol_zero)
+                        W = sparse(W_I, W_J, W_V, length(N), p)
+                    else
+                        chunk_size_w = cld(n_active, n_tasks_w)
+                        partitions_w = collect(Iterators.partition(1:n_active, chunk_size_w))
+                        thread_triplets = [ (Int[], Int[], Float64[]) for _ in 1:length(partitions_w) ]
+
+                        @sync for t_idx in 1:length(partitions_w)
+                            let t_idx = t_idx, k_range = UnitRange{Int}(partitions_w[t_idx])
+                                Threads.@spawn begin
+                                    I_t, J_t, V_t = thread_triplets[t_idx]
+                                    _solve_w_chunk!(I_t, J_t, V_t, k_range, active_rows, D_N_T, F_DB, p, tol_zero)
+                                end
                             end
                         end
+
+                        total_nnz_w = sum(length(t[1]) for t in thread_triplets)
+                        W_I = Vector{Int}(undef, total_nnz_w)
+                        W_J = Vector{Int}(undef, total_nnz_w)
+                        W_V = Vector{Float64}(undef, total_nnz_w)
+                        offset = 0
+                        for t in thread_triplets
+                            len = length(t[1])
+                            copyto!(W_I, offset + 1, t[1], 1, len)
+                            copyto!(W_J, offset + 1, t[2], 1, len)
+                            copyto!(W_V, offset + 1, t[3], 1, len)
+                            offset += len
+                        end
+                        W = sparse(W_I, W_J, W_V, length(N), p)
                     end
 
-                    W = sparse(W_I, W_J, W_V, length(N), p)
-                    Delta_A = W * A_B
-                    sdp.A = sparse(sdp.A[N, :] - Delta_A)
+                    n_N = length(N)
+                    A_N_full = sdp.A[N, :]
+                    n_tasks_a = min(j_threads, n_N)
+
+                    if n_tasks_a <= 1
+                        Delta_A = W * A_B
+                        sdp.A = dropzeros!(A_N_full - Delta_A)
+                    else
+                        chunk_size_a = cld(n_N, n_tasks_a)
+                        partitions_a = collect(Iterators.partition(1:n_N, chunk_size_a))
+                        A_chunks = Vector{SparseMatrixCSC{Float64, Int}}(undef, length(partitions_a))
+
+                        @sync for t_idx in 1:length(partitions_a)
+                            let t_idx = t_idx, r_range = UnitRange{Int}(partitions_a[t_idx])
+                                Threads.@spawn begin
+                                    _compute_a_chunk!(A_chunks, t_idx, r_range, W, A_N_full, A_B)
+                                end
+                            end
+                        end
+                        sdp.A = vcat(A_chunks...)
+                    end
                 end
             end
 

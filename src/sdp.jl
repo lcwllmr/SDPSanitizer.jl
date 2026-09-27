@@ -1,5 +1,5 @@
 """
-    SanitizerConfig(; verbose::Bool = false, eliminate_free_variables::Bool = true, eliminate_redundant_constraints::Bool = false)
+    SanitizerConfig(; verbose::Bool = false, eliminate_free_variables::Bool = true, eliminate_redundant_constraints::Bool = false, num_threads::Int = 0)
 
 Configuration options for presolving SDPs in `SDPSanitizer`.
 
@@ -7,11 +7,13 @@ Configuration options for presolving SDPs in `SDPSanitizer`.
 - `verbose::Bool`: Print logging and timing diagnostics during presolve (default: `false`).
 - `eliminate_free_variables::Bool`: Detect and eliminate free affine variables `z` (default: `true`).
 - `eliminate_redundant_constraints::Bool`: Detect and eliminate linearly redundant conic equality constraints (default: `false`).
+- `num_threads::Int`: Number of worker threads to use for parallel presolve computations. `0` auto-selects up to min(available, 8) threads (default: `0`).
 """
 Base.@kwdef mutable struct SanitizerConfig
     verbose::Bool = false
     eliminate_free_variables::Bool = true
     eliminate_redundant_constraints::Bool = false
+    num_threads::Int = 0
 end
 
 """
@@ -112,7 +114,8 @@ end
 Base.copy(cfg::SanitizerConfig) = SanitizerConfig(
     verbose = cfg.verbose,
     eliminate_free_variables = cfg.eliminate_free_variables,
-    eliminate_redundant_constraints = cfg.eliminate_redundant_constraints
+    eliminate_redundant_constraints = cfg.eliminate_redundant_constraints,
+    num_threads = cfg.num_threads
 )
 
 function Base.copy(sdp::SemidefiniteProgram)
