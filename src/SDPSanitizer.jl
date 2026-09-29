@@ -17,7 +17,11 @@ include("synth.jl")
 export synthetic_sdp
 
 include("wrapper.jl")
-export MOIWrapper, get_last_inner_solve_time, get_last_total_solve_time
+export MOIWrapper, get_last_inner_solve_time, get_last_total_solve_time, reset_solve_times!
+
+function __init__()
+    reset_solve_times!()
+end
 
 using PrecompileTools: @setup_workload, @compile_workload
 

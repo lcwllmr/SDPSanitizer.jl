@@ -129,6 +129,12 @@ const LAST_TOTAL_SOLVE_TIME = Ref{Float64}(0.0)
 get_last_inner_solve_time() = LAST_INNER_SOLVE_TIME[]
 get_last_total_solve_time() = LAST_TOTAL_SOLVE_TIME[]
 
+function reset_solve_times!()
+    LAST_INNER_SOLVE_TIME[] = 0.0
+    LAST_TOTAL_SOLVE_TIME[] = 0.0
+    return nothing
+end
+
 MOIWrapper(optimizer_constructor::Function; kwargs...) = MOIWrapper(optimizer_constructor(); kwargs...)
 MOIWrapper(optimizer_type::Type{<:MOI.ModelLike}; kwargs...) = MOIWrapper(optimizer_type(); kwargs...)
 
@@ -220,6 +226,7 @@ end
 
 # Optimization and presolve pipeline
 function MOI.optimize!(opt::MOIWrapper)
+    reset_solve_times!()
     t_start = time()
     # 1. Classify variables: Conic PSD vs free affine variables
     all_vars = MOI.get(opt.model, MOI.ListOfVariableIndices())
