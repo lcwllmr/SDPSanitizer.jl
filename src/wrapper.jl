@@ -606,6 +606,11 @@ function MOI.optimize!(opt::MOIWrapper)
         opt.inner_presolved_con = inner_map[opt.inner_presolved_con]
     end
 
+    # Free intermediate presolved model and large conic matrices before inner solver runs
+    MOI.empty!(presolved_model)
+    sdp.A = spzeros(Float64, 0, 0)
+    sdp.D = spzeros(Float64, 0, 0)
+
     if opt.verbose
         println("[SDPSanitizer.MOIWrapper] Solving reduced problem with inner solver...")
     end
@@ -616,19 +621,40 @@ function MOI.optimize!(opt::MOIWrapper)
 
     # 7. Solution recovery
     status = MOI.get(opt.inner, MOI.PrimalStatus())
-    if status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
-        Z_sol = [MOI.get(opt.inner, MOI.VariablePrimal(), opt.inner_var_map[v]) for v in opt.psd_vars]
-        opt.recovered_affine_primal = recover_affine_solution(sdp, Z_sol)
+    has_results = try
+        MOI.get(opt.inner, MOI.ResultCount()) >= 1
+    catch
+        false
+    end
+    if status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT) || (has_results && status != MOI.NO_SOLUTION)
+        try
+            Z_sol = [MOI.get(opt.inner, MOI.VariablePrimal(), opt.inner_var_map[v]) for v in opt.psd_vars]
+            opt.recovered_affine_primal = recover_affine_solution(sdp, Z_sol)
+        catch e
+            if opt.verbose
+                println("[SDPSanitizer.MOIWrapper] Warning: Primal recovery failed ($status): $e")
+            end
+        end
     end
 
     dual_status = MOI.get(opt.inner, MOI.DualStatus())
-    if (dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT) || opt.inner_presolved_con === nothing) && !opt.facial_reduction_applied
-        y_presolved = if opt.inner_presolved_con !== nothing && dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
-            MOI.get(opt.inner, MOI.ConstraintDual(), opt.inner_presolved_con)
-        else
-            Float64[]
+    can_try_dual = dual_status in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT) ||
+                   (has_results && dual_status != MOI.NO_SOLUTION)
+    if (can_try_dual || opt.inner_presolved_con === nothing) && !opt.facial_reduction_applied
+        try
+            y_presolved = if opt.inner_presolved_con !== nothing && can_try_dual
+                MOI.get(opt.inner, MOI.ConstraintDual(), opt.inner_presolved_con)
+            else
+                Float64[]
+            end
+            if opt.inner_presolved_con === nothing || !isempty(y_presolved)
+                opt.recovered_dual = recover_dual_solution(sdp, y_presolved)
+            end
+        catch e
+            if opt.verbose
+                println("[SDPSanitizer.MOIWrapper] Warning: Dual recovery failed ($dual_status): $e")
+            end
         end
-        opt.recovered_dual = recover_dual_solution(sdp, y_presolved)
     end
     opt.solve_time = time() - t_start
     LAST_TOTAL_SOLVE_TIME[] = opt.solve_time
@@ -649,6 +675,9 @@ function MOI.get(opt::MOIWrapper, attr::MOI.DualStatus)
     if inner_st == MOI.NO_SOLUTION && opt.inner_presolved_con === nothing && MOI.get(opt.inner, MOI.PrimalStatus()) in (MOI.FEASIBLE_POINT, MOI.NEARLY_FEASIBLE_POINT)
         return MOI.FEASIBLE_POINT
     end
+    if isempty(opt.recovered_dual) && opt.presolve && ((opt.eliminate_free_variables && !isempty(opt.affine_vars)) || opt.eliminate_redundant_constraints)
+        return MOI.NO_SOLUTION
+    end
     return inner_st
 end
 MOI.get(opt::MOIWrapper, attr::MOI.ObjectiveValue) = opt.infeasible ? NaN : MOI.get(opt.inner, attr)
@@ -666,6 +695,9 @@ function MOI.get(opt::MOIWrapper, attr::MOI.VariablePrimal, v::MOI.VariableIndex
         return MOI.get(opt.inner, attr, opt.inner_var_map[v])
     elseif haskey(opt.affine_var_to_col, v)
         idx = opt.affine_var_to_col[v]
+        if isempty(opt.recovered_affine_primal) || idx > length(opt.recovered_affine_primal)
+            error("Affine variable primal not available in SDPSanitizer.MOIWrapper (PrimalStatus = $(MOI.get(opt.inner, MOI.PrimalStatus())))")
+        end
         return opt.recovered_affine_primal[idx]
     else
         error("Variable $v not recognized in SDPSanitizer.MOIWrapper")
@@ -685,6 +717,9 @@ function MOI.get(opt::MOIWrapper, attr::MOI.ConstraintDual, c::MOI.ConstraintInd
     offset = opt.con_row_offsets[c]
     idx = findfirst(==(c), opt.affine_con_indices)
     dim = opt.affine_con_dims[idx]
+    if isempty(opt.recovered_dual) || offset + dim > length(opt.recovered_dual)
+        error("Constraint duals not available in SDPSanitizer.MOIWrapper (inner DualStatus = $(MOI.get(opt.inner, MOI.DualStatus())), TerminationStatus = $(MOI.get(opt.inner, MOI.TerminationStatus())))")
+    end
     slice = opt.recovered_dual[offset+1 : offset+dim]
     return dim == 1 && c isa MOI.ConstraintIndex{<:MOI.ScalarAffineFunction} ? slice[1] : slice
 end
