@@ -19,6 +19,7 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
     facial_reduction::Bool
     facial_reduction_applied::Bool
     num_threads::Int
+    cond_tol::Float64
     verbose::Bool
     silent::Bool
 
@@ -66,6 +67,7 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
         facial_reduction::Bool = false,
         sieve::Union{Nothing, Bool} = nothing,
         num_threads::Int = 0,
+        cond_tol::Float64 = 1e-9,
         verbose::Bool = false
     ) where {O <: MOI.ModelLike}
         bridged_inner = if inner isa MOI.Bridges.AbstractBridgeOptimizer
@@ -93,6 +95,7 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
             eff_facial_red,
             false, # facial_reduction_applied
             num_threads,
+            cond_tol,
             verbose,
             silent,
             false, # infeasible
@@ -209,6 +212,8 @@ function MOI.set(opt::MOIWrapper, attr::MOI.RawOptimizerAttribute, val)
         opt.facial_reduction = Bool(val)
     elseif attr.name == "num_threads" || attr.name == "threads"
         opt.num_threads = Int(val)
+    elseif attr.name == "cond_tol"
+        opt.cond_tol = Float64(val)
     elseif attr.name == "verbose"
         opt.verbose = Bool(val)
     else
@@ -456,7 +461,8 @@ function MOI.optimize!(opt::MOIWrapper)
             verbose = opt.verbose,
             eliminate_free_variables = opt.eliminate_free_variables,
             eliminate_redundant_constraints = opt.eliminate_redundant_constraints,
-            num_threads = opt.num_threads
+            num_threads = opt.num_threads,
+            cond_tol = opt.cond_tol
         )
     )
     A = spzeros(Float64, 0, 0)
@@ -595,15 +601,26 @@ function MOI.optimize!(opt::MOIWrapper)
     # Add reduced affine equality constraints Ã(Z) + b̃ = 0
     m_new = size(sdp.A, 1)
     if m_new > 0
-        con_terms = MOI.VectorAffineTerm{Float64}[]
+        nnz_A = nnz(sdp.A)
+        con_terms = Vector{MOI.VectorAffineTerm{Float64}}(undef, nnz_A)
         rows_A = rowvals(sdp.A)
         vals_A = nonzeros(sdp.A)
+        term_idx = 0
+        max_coeff = 0.0
         for col in 1:size(sdp.A, 2)
             v_inner = opt.inner_var_map[opt.psd_vars[col]]
             for ptr in nzrange(sdp.A, col)
-                row = rows_A[ptr]
-                push!(con_terms, MOI.VectorAffineTerm(row, MOI.ScalarAffineTerm(vals_A[ptr], v_inner)))
+                term_idx += 1
+                v_coeff = vals_A[ptr]
+                abs_c = abs(v_coeff)
+                if abs_c > max_coeff
+                    max_coeff = abs_c
+                end
+                con_terms[term_idx] = MOI.VectorAffineTerm(rows_A[ptr], MOI.ScalarAffineTerm(v_coeff, v_inner))
             end
+        end
+        if max_coeff > 1e15
+            @warn "[SDPSanitizer] Presolved conic matrix A contains huge coefficient: $max_coeff (max allowed before Mosek error 1482 is 1e20). Consider checking network conditioning."
         end
         con_constants = Vector(sdp.b)
         con_func = MOI.VectorAffineFunction(con_terms, con_constants)

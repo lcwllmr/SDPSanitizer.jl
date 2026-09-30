@@ -14,6 +14,56 @@ Base.@kwdef mutable struct SanitizerConfig
     eliminate_free_variables::Bool = true
     eliminate_redundant_constraints::Bool = false
     num_threads::Int = 0
+    cond_tol::Float64 = 1e-9
+end
+
+"""
+    EquilibratedLU{Tv} <: LinearAlgebra.Factorization{Tv}
+
+Sparse LU factorization with two-sided diagonal row and column equilibration:
+    D_B = diag(1 ./ r) * D_tilde * diag(1 ./ c)
+where `D_tilde` has balanced row and column norms in [-1, 1], and `lu = lu(D_tilde)`.
+"""
+struct EquilibratedLU{Tv} <: LinearAlgebra.Factorization{Tv}
+    lu::LinearAlgebra.Factorization{Tv}
+    r::Vector{Tv}
+    c::Vector{Tv}
+end
+
+Base.copy(F::EquilibratedLU{Tv}) where Tv = EquilibratedLU{Tv}(copy(F.lu), F.r, F.c)
+
+function Base.:\(F::EquilibratedLU{Tv}, b::AbstractVector{Tv}) where Tv
+    scaled_b = F.r .* b
+    y = F.lu \ scaled_b
+    return F.c .* y
+end
+
+function LinearAlgebra.ldiv!(x::AbstractVector{Tv}, F::EquilibratedLU{Tv}, b::AbstractVector{Tv}) where Tv
+    scaled_b = F.r .* b
+    y = F.lu \ scaled_b
+    x .= F.c .* y
+    return x
+end
+
+struct AdjointEquilibratedLU{Tv}
+    parent::EquilibratedLU{Tv}
+end
+
+Base.adjoint(F::EquilibratedLU{Tv}) where Tv = AdjointEquilibratedLU{Tv}(F)
+
+function Base.:\(adj::AdjointEquilibratedLU{Tv}, b::AbstractVector{Tv}) where Tv
+    F = adj.parent
+    scaled_b = F.c .* b
+    y = F.lu' \ scaled_b
+    return F.r .* y
+end
+
+function LinearAlgebra.ldiv!(x::AbstractVector{Tv}, adj::AdjointEquilibratedLU{Tv}, b::AbstractVector{Tv}) where Tv
+    F = adj.parent
+    scaled_b = F.c .* b
+    ldiv!(x, F.lu', scaled_b)
+    x .*= F.r
+    return x
 end
 
 """

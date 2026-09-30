@@ -79,7 +79,14 @@ function _compute_a_chunk!(
         A_chunks[t_idx] = A_orig_sub
     else
         Delta_sub = W_sub * A_B
-        A_chunks[t_idx] = dropzeros!(A_orig_sub - Delta_sub)
+        diff = A_orig_sub - Delta_sub
+        tol_noise = 1e-12
+        for ptr in 1:nnz(diff)
+            if abs(diff.nzval[ptr]) < tol_noise
+                diff.nzval[ptr] = 0.0
+            end
+        end
+        A_chunks[t_idx] = dropzeros!(diff)
     end
 end
 
@@ -213,7 +220,8 @@ function presolve!(sdp::SemidefiniteProgram)
             @time_if sdp.config.verbose F2 = qr(sparse(D_piv'))
             R2 = F2.R::SparseMatrixCSC{Float64, Int}
             diag_R2 = abs.(diag(R2))
-            tol2 = eps(Float64) * max(m, p) * (isempty(diag_R2) ? 1.0 : maximum(diag_R2))
+            max_diag2 = isempty(diag_R2) ? 1.0 : maximum(diag_R2)
+            tol2 = max(eps(Float64) * max(m, p) * max_diag2, sdp.config.cond_tol * max_diag2)
             nzdiag2 = findall(>(tol2), diag_R2)
             pcol2 = F2.pcol::Vector{Int}
             n_pivots = min(p, length(nzdiag2))
@@ -235,9 +243,47 @@ function presolve!(sdp::SemidefiniteProgram)
             end
 
             if sdp.config.verbose
-                println("  Computing sparse LU factorization of basis matrix D[B, :]...")
+                println("  Computing sparse LU factorization of basis matrix D[B, :] with two-sided equilibration...")
             end
-            @time_if sdp.config.verbose F_DB = lu(sdp.D[B, :])
+            D_B_raw = sdp.D[B, :]
+            c_scale = zeros(Float64, p)
+            for j in 1:p
+                cmax = 0.0
+                for ptr in nzrange(D_B_raw, j)
+                    v = abs(D_B_raw.nzval[ptr])
+                    if v > cmax
+                        cmax = v
+                    end
+                end
+                c_scale[j] = cmax > 0.0 ? 1.0 / cmax : 1.0
+            end
+
+            r_scale = zeros(Float64, length(B))
+            for j in 1:p
+                cj = c_scale[j]
+                for ptr in nzrange(D_B_raw, j)
+                    row = D_B_raw.rowval[ptr]
+                    v = abs(D_B_raw.nzval[ptr]) * cj
+                    if v > r_scale[row]
+                        r_scale[row] = v
+                    end
+                end
+            end
+            for i in 1:length(r_scale)
+                r_scale[i] = r_scale[i] > 0.0 ? 1.0 / r_scale[i] : 1.0
+            end
+
+            D_B_equil = copy(D_B_raw)
+            for j in 1:p
+                cj = c_scale[j]
+                for ptr in nzrange(D_B_equil, j)
+                    row = D_B_equil.rowval[ptr]
+                    D_B_equil.nzval[ptr] *= (r_scale[row] * cj)
+                end
+            end
+
+            @time_if sdp.config.verbose raw_lu = lu(D_B_equil)
+            F_DB = EquilibratedLU(raw_lu, r_scale, c_scale)
 
             if sdp.config.verbose
                 println("  Computing objective modification vector f_B...")
@@ -328,7 +374,14 @@ function presolve!(sdp::SemidefiniteProgram)
 
                     if n_tasks_a <= 1
                         Delta_A = W * A_B
-                        sdp.A = dropzeros!(A_N_full - Delta_A)
+                        diff = A_N_full - Delta_A
+                        tol_noise = 1e-12
+                        for ptr in 1:nnz(diff)
+                            if abs(diff.nzval[ptr]) < tol_noise
+                                diff.nzval[ptr] = 0.0
+                            end
+                        end
+                        sdp.A = dropzeros!(diff)
                     else
                         chunk_size_a = cld(n_N, n_tasks_a)
                         partitions_a = collect(Iterators.partition(1:n_N, chunk_size_a))
