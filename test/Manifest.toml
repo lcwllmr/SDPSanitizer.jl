@@ -888,7 +888,7 @@ uuid = "7fc90fd6-dbef-5a6a-93f8-169f2a2e705b"
 version = "700.300.1900+0"
 
 [[deps.SDPSanitizer]]
-deps = ["LinearAlgebra", "MathOptInterface", "SparseArrays"]
+deps = ["LinearAlgebra", "MathOptInterface", "PrecompileTools", "SparseArrays"]
 path = ".."
 uuid = "234b0176-ea36-4e4f-aeb2-cbded6855f42"
 version = "1.0.0-DEV"
@@ -1048,7 +1048,7 @@ uuid = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 version = "1.0.3"
 
 [[deps.TSSOS]]
-deps = ["AbstractAlgebra", "AbstractPermutations", "COSMO", "CliqueTrees", "ClusteredLowRankSolver", "Dualization", "DynamicPolynomials", "Graphs", "Groebner", "Ipopt", "JuMP", "LinearAlgebra", "MetaGraphs", "Mosek", "MosekTools", "MultivariateBases", "MultivariatePolynomials", "PermutationGroups", "Printf", "Random", "Reexport", "RowEchelon", "SCS", "SemialgebraicSets", "SparseArrays", "SymbolicWedderburn", "Test"]
+deps = ["AbstractAlgebra", "AbstractPermutations", "COSMO", "CliqueTrees", "ClusteredLowRankSolver", "Dualization", "DynamicPolynomials", "Graphs", "Groebner", "Ipopt", "JuMP", "LinearAlgebra", "MetaGraphs", "Mosek", "MosekTools", "MultivariateBases", "MultivariatePolynomials", "PermutationGroups", "PrecompileTools", "Printf", "Random", "Reexport", "RowEchelon", "SCS", "SemialgebraicSets", "SparseArrays", "SymbolicWedderburn", "Test"]
 path = "../deps/TSSOS"
 uuid = "81648402-ffe6-11e9-2394-0de17a9afdad"
 version = "1.5.3"

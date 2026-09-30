@@ -58,10 +58,22 @@ import SDPA
              (sqrt(6)-sqrt(2))/4, (sqrt(6)+sqrt(2))/4]
     fx_opt = 11 - 3 * (sqrt(6) + sqrt(2))
 
-    model = Model(() -> SDPSanitizer.MOIWrapper(solver; presolve=true, eliminate_free_variables=true, eliminate_redundant_constraints=true, detect_infeasibility=true, verbose=true))
+    # Configure solver factory with appropriate tolerances (SCS needs tighter tolerances than default 1e-4)
+    optimizer_factory = if solver === SCS.Optimizer
+        () -> begin
+            opt = SCS.Optimizer()
+            MOI.set(opt, MOI.RawOptimizerAttribute("eps_abs"), 1e-6)
+            MOI.set(opt, MOI.RawOptimizerAttribute("eps_rel"), 1e-6)
+            opt
+        end
+    else
+        solver
+    end
+
+    model = Model(() -> SDPSanitizer.MOIWrapper(optimizer_factory(); presolve=true, eliminate_free_variables=true, eliminate_redundant_constraints=true, detect_infeasibility=true, verbose=true))
     opt_p, sol_p, data_p = cs_tssos(pop, x, 1; numeq=length(equalities), TS="block", CS="MF", QUIET=false, solution=true, solution_mode="moment", model=model)
     @test termination_status(model) == MOI.OPTIMAL
     @test isapprox(opt_p, fx_opt, atol=1e-4)
     @test length(sol_p) == 1
-    @test isapprox(sol_p[1], x_opt, atol=1e-2)
+    @test isapprox(sol_p[1], x_opt, atol=1e-3)
 end

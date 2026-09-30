@@ -193,9 +193,8 @@ function presolve!(sdp::SemidefiniteProgram)
             if sdp.config.verbose
                 println("Stage 1 - Step 2: Performing QR to extract row space basis of affine constraint matrix D...")
             end
-            # Filter out tiny entries (< 1e-3 * cmax) relative to each column's max magnitude
-            # so COLAMD cannot choose O(1) singleton rows as pivots when the same column has
-            # O(1e5) low-impedance entries, and so near-syzygy columns that would amplify A by >1e5x are pruned.
+            # Column equilibration: normalize each column by its maximum magnitude
+            # so that relative magnitudes are balanced without deleting genuine nonzeros.
             D_piv = copy(sdp.D)
             for j in 1:p
                 cmax = 0.0
@@ -206,50 +205,19 @@ function presolve!(sdp::SemidefiniteProgram)
                     end
                 end
                 if cmax > 0.0
-                    thresh = 1e-3 * cmax
                     for ptr in nzrange(D_piv, j)
-                        if abs(D_piv.nzval[ptr]) < thresh
-                            D_piv.nzval[ptr] = 0.0
-                        else
-                            D_piv.nzval[ptr] /= cmax
-                        end
+                        D_piv.nzval[ptr] /= cmax
                     end
                 end
             end
-            dropzeros!(D_piv)
             @time_if sdp.config.verbose F2 = qr(sparse(D_piv'))
             R2 = F2.R::SparseMatrixCSC{Float64, Int}
             diag_R2 = abs.(diag(R2))
             tol2 = eps(Float64) * max(m, p) * (isempty(diag_R2) ? 1.0 : maximum(diag_R2))
             nzdiag2 = findall(>(tol2), diag_R2)
             pcol2 = F2.pcol::Vector{Int}
-            B = pcol2[nzdiag2[1:min(p, length(nzdiag2))]]
-            while length(B) < p
-                if sdp.config.verbose
-                    println("  Pruning $(p - length(B)) ill-conditioned affine syzygy columns (retaining $(length(B)) / $p well-conditioned columns)...")
-                end
-                F_sub = qr(D_piv[B, :])
-                R_sub = F_sub.R::SparseMatrixCSC{Float64, Int}
-                diag_sub = abs.(diag(R_sub))
-                tol_sub = eps(Float64) * max(length(B), p) * (isempty(diag_sub) ? 1.0 : maximum(diag_sub))
-                nz_sub = findall(>(tol_sub), diag_sub)
-                sub_cols = (F_sub.pcol::Vector{Int})[nz_sub[1:min(length(B), length(nz_sub))]]
-                independent_cols = independent_cols[sub_cols]
-                f_indep = f_indep[sub_cols]
-                sdp.D = sdp.D[:, sub_cols]
-                sdp.f = sparse(f_indep)
-                D_piv = D_piv[:, sub_cols]
-                p = length(sub_cols)
-                if length(B) > p
-                    F_row = qr(sparse(D_piv[B, :]'))
-                    R_row = F_row.R::SparseMatrixCSC{Float64, Int}
-                    diag_row = abs.(diag(R_row))
-                    tol_row = 0.1 * tol_sub
-                    nz_row = findall(>(tol_row), diag_row)
-                    sub_rows = (F_row.pcol::Vector{Int})[nz_row[1:min(p, length(nz_row))]]
-                    B = B[sub_rows]
-                end
-            end
+            n_pivots = min(p, length(nzdiag2))
+            B = pcol2[nzdiag2[1:n_pivots]]
             D_piv = spzeros(Float64, 0, 0)
             D_col_scaled = spzeros(Float64, 0, 0)
 
