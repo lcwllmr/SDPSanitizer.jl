@@ -80,6 +80,12 @@ function _compute_a_chunk!(
     else
         Delta_sub = W_sub * A_B
         diff = A_orig_sub - Delta_sub
+        max_diff = isempty(diff.nzval) ? 0.0 : maximum(abs.(diff.nzval))
+        if max_diff > 1e15
+            max_w_sub = isempty(W_sub.nzval) ? 0.0 : maximum(abs.(W_sub.nzval))
+            max_ab = isempty(A_B.nzval) ? 0.0 : maximum(abs.(A_B.nzval))
+            println("    [Chunk $t_idx Alert] max |diff| = $max_diff, max |W_sub| = $max_w_sub, max |A_B| = $max_ab")
+        end
         tol_noise = 1e-12
         for ptr in 1:nnz(diff)
             if abs(diff.nzval[ptr]) < tol_noise
@@ -133,6 +139,8 @@ function presolve!(sdp::SemidefiniteProgram)
         println("Problem dimensions: $dim_desc, p = $p, m = $m")
         println("Worker threads: Julia = $j_threads, SPQR = $spqr_threads")
         println("eliminate_free_variables: $(sdp.config.eliminate_free_variables), eliminate_redundant_constraints: $(sdp.config.eliminate_redundant_constraints)")
+        max_d = isempty(sdp.D.nzval) ? 0.0 : maximum(abs.(sdp.D.nzval))
+        println("sdp.D max entry before presolve: $max_d")
     end
 
     if m == 0
@@ -165,13 +173,17 @@ function presolve!(sdp::SemidefiniteProgram)
         @time_if sdp.config.verbose F1 = qr(D_col_scaled)
         R1 = F1.R::SparseMatrixCSC{Float64, Int}
         diag_R1 = abs.(diag(R1))
-        tol1 = eps(Float64) * max(m, p) * (isempty(diag_R1) ? 1.0 : maximum(diag_R1))
+        max_diag1 = isempty(diag_R1) ? 1.0 : maximum(diag_R1)
+        tol1 = max(eps(Float64) * max(m, p) * max_diag1, sdp.config.cond_tol * max_diag1)
         nzdiag1 = findall(>(tol1), diag_R1)
         independent_cols = (F1.pcol::Vector{Int})[nzdiag1]
         p_rank = length(independent_cols)
 
         if sdp.config.verbose
             println("Affine constraint matrix D has rank $p_rank out of $p columns.")
+            if !isempty(diag_R1)
+                println("  R1 pivots: min = $(minimum(diag_R1)), max = $max_diag1, tol1 = $tol1")
+            end
         end
 
         if p_rank == 0
@@ -235,6 +247,9 @@ function presolve!(sdp::SemidefiniteProgram)
 
             if sdp.config.verbose
                 println("Extracted basis rows B of size $(length(B)) and non-basis rows N of size $(length(N)).")
+                if !isempty(diag_R2)
+                    println("  R2 pivots: min = $(minimum(diag_R2)), max = $max_diag2, tol2 = $tol2")
+                end
             end
 
             ######## STEP 3: Incorporate affine into conic data ########
@@ -283,6 +298,15 @@ function presolve!(sdp::SemidefiniteProgram)
             end
 
             @time_if sdp.config.verbose raw_lu = lu(D_B_equil)
+            if sdp.config.verbose
+                U_diag = abs.(diag(raw_lu.U))
+                min_u = isempty(U_diag) ? 1.0 : minimum(U_diag)
+                max_u = isempty(U_diag) ? 1.0 : maximum(U_diag)
+                println("  D_B LU U-diagonal pivots: min = $min_u, max = $max_u, cond_est = $(max_u / min_u)")
+                println("    Pivots < 1e-12: $(count(<(1e-12), U_diag)), < 1e-8: $(count(<(1e-8), U_diag)), < 1e-5: $(count(<(1e-5), U_diag))")
+                println("    r_scale: min = $(minimum(r_scale)), max = $(maximum(r_scale))")
+                println("    c_scale: min = $(minimum(c_scale)), max = $(maximum(c_scale))")
+            end
             F_DB = EquilibratedLU(raw_lu, r_scale, c_scale)
 
             if sdp.config.verbose
@@ -374,6 +398,12 @@ function presolve!(sdp::SemidefiniteProgram)
 
                     if n_tasks_a <= 1
                         Delta_A = W * A_B
+                        if sdp.config.verbose
+                            max_w = isempty(W.nzval) ? 0.0 : maximum(abs.(W.nzval))
+                            max_ab = isempty(A_B.nzval) ? 0.0 : maximum(abs.(A_B.nzval))
+                            max_delta = isempty(Delta_A.nzval) ? 0.0 : maximum(abs.(Delta_A.nzval))
+                            println("    [Stage 1 Diagnostic] max |W| = $max_w, max |A_B| = $max_ab, max |Delta_A| = $max_delta")
+                        end
                         diff = A_N_full - Delta_A
                         tol_noise = 1e-12
                         for ptr in 1:nnz(diff)
