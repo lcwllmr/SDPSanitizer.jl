@@ -406,8 +406,11 @@ function MOI.optimize!(opt::MOIWrapper)
     end
 
     A = sparse(A_I, A_J, A_V, m, n)
+    A_I = Int[]; A_J = Int[]; A_V = Float64[]
     D = sparse(D_I, D_J, D_V, m, p)
+    D_I = Int[]; D_J = Int[]; D_V = Float64[]
     b = sparse(b_vec)
+    b_vec = Float64[]
 
     # 4. Extract objective C, f, b0
     C_I = Int[]; C_V = Float64[]
@@ -456,6 +459,9 @@ function MOI.optimize!(opt::MOIWrapper)
             num_threads = opt.num_threads
         )
     )
+    A = spzeros(Float64, 0, 0)
+    D = spzeros(Float64, 0, 0)
+    b = spzeros(Float64, 0)
 
     if opt.verbose
         println("[SDPSanitizer.MOIWrapper] Before presolve: f = ", Vector(sdp.f))
@@ -602,6 +608,9 @@ function MOI.optimize!(opt::MOIWrapper)
         con_constants = Vector(sdp.b)
         con_func = MOI.VectorAffineFunction(con_terms, con_constants)
         opt.inner_presolved_con = MOI.add_constraint(presolved_model, con_func, MOI.Zeros(m_new))
+        con_terms = MOI.VectorAffineTerm{Float64}[]
+        con_constants = Float64[]
+        con_func = nothing
     end
 
     # 6. Copy presolved model to inner solver and optimize
@@ -615,8 +624,10 @@ function MOI.optimize!(opt::MOIWrapper)
 
     # Free intermediate presolved model and large conic matrices before inner solver runs
     MOI.empty!(presolved_model)
+    MOI.empty!(opt.model)
     sdp.A = spzeros(Float64, 0, 0)
     sdp.D = spzeros(Float64, 0, 0)
+    GC.gc()
 
     if opt.verbose
         println("[SDPSanitizer.MOIWrapper] Solving reduced problem with inner solver...")
