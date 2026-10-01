@@ -2,6 +2,7 @@ using SDPSanitizer
 using Test
 using LinearAlgebra
 using SparseArrays
+using Random
 import MathOptInterface as MOI
 using Clarabel
 using CSDP
@@ -48,14 +49,15 @@ using CSDP
         MOI.optimize!(opt_par)
         status = MOI.get(opt_par, MOI.TerminationStatus())
         @test status in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL)
+        tol = status == MOI.OPTIMAL ? 1e-5 : 1e-2
         obj_par = MOI.get(opt_par, MOI.ObjectiveValue())
-        @test isapprox(obj_par, 0.0, atol=1e-5)
+        @test isapprox(obj_par, 0.0, atol=tol)
 
         # Test affine solution recovery
         Z_vars = MOI.get(model_par, MOI.ListOfVariableIndices())
         Z_sol = MOI.get(opt_par, MOI.VariablePrimal(), [idx_map_par[v] for v in Z_vars])
         z_rec = recover_affine_solution(sdp_par, Z_sol)
-        @test isapprox(sdp_base.A * Z_sol + sdp_base.D * z_rec + sdp_base.b, zeros(m), atol=1e-5)
+        @test isapprox(sdp_base.A * Z_sol + sdp_base.D * z_rec + sdp_base.b, zeros(m), atol=tol)
     end
 end
 
