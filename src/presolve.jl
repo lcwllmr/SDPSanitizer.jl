@@ -212,34 +212,88 @@ function presolve!(sdp::SemidefiniteProgram)
             if sdp.config.verbose
                 println("Stage 1 - Step 2: Performing QR to extract row space basis of affine constraint matrix D...")
             end
-            # Column equilibration: normalize each column by its maximum magnitude
-            # so that relative magnitudes are balanced without deleting genuine nonzeros.
-            D_piv = copy(sdp.D)
-            for j in 1:p
-                cmax = 0.0
-                for ptr in nzrange(D_piv, j)
-                    v = abs(D_piv.nzval[ptr])
-                    if v > cmax
-                        cmax = v
-                    end
+            # Transpose D so columns correspond to rows of D
+            DT = sparse(sdp.D')
+            # Normalize each column of Dᵀ (row of D) so column-pivoted QR treats all rows equitably
+            for col in 1:m
+                s = 0.0
+                for ptr in nzrange(DT, col)
+                    s = hypot(s, DT.nzval[ptr])
                 end
-                if cmax > 0.0
-                    for ptr in nzrange(D_piv, j)
-                        D_piv.nzval[ptr] /= cmax
+                if s > 0.0
+                    for ptr in nzrange(DT, col)
+                        DT.nzval[ptr] /= s
                     end
                 end
             end
-            @time_if sdp.config.verbose F2 = qr(sparse(D_piv'))
+            @time_if sdp.config.verbose F2 = qr(DT)
             R2 = F2.R::SparseMatrixCSC{Float64, Int}
             diag_R2 = abs.(diag(R2))
             max_diag2 = isempty(diag_R2) ? 1.0 : maximum(diag_R2)
             tol2 = max(eps(Float64) * max(m, p) * max_diag2, sdp.config.cond_tol * max_diag2)
             nzdiag2 = findall(>(tol2), diag_R2)
             pcol2 = F2.pcol::Vector{Int}
-            n_pivots = min(p, length(nzdiag2))
-            B = pcol2[nzdiag2[1:n_pivots]]
-            D_piv = spzeros(Float64, 0, 0)
+            r = min(p, length(nzdiag2))
+            B = pcol2[nzdiag2[1:r]]
+            DT = spzeros(Float64, 0, 0)
             D_col_scaled = spzeros(Float64, 0, 0)
+
+            if r < p
+                if sdp.config.verbose
+                    println("  Row rank r = $r < p = $p. Reconciling columns via QR on basis slice D[B, :]...")
+                end
+                D_B_rect = copy(sdp.D[B, :])
+                for col in 1:p
+                    s = 0.0
+                    for ptr in nzrange(D_B_rect, col)
+                        s = hypot(s, D_B_rect.nzval[ptr])
+                    end
+                    if s > 0.0
+                        for ptr in nzrange(D_B_rect, col)
+                            D_B_rect.nzval[ptr] /= s
+                        end
+                    end
+                end
+                F_c = qr(D_B_rect)
+                d_c = abs.(diag(F_c.R))
+                max_dc = isempty(d_c) ? 1.0 : maximum(d_c)
+                tol_c = max(eps(Float64) * max(size(D_B_rect)...) * max_dc, sdp.config.cond_tol * max_dc)
+                nz_c = findall(>(tol_c), d_c)
+                r_final = length(nz_c)
+                if sdp.config.verbose
+                    println("  F_c pivots: min = $(minimum(d_c)), max = $max_dc, valid r_final = $r_final (dropped $(p - r_final) cols)")
+                end
+                C = (F_c.pcol::Vector{Int})[nz_c]
+                independent_cols = independent_cols[C]
+                sdp.D = sdp.D[:, C]
+                sdp.f = sparse(sdp.f[C])
+                f_indep = Vector(sdp.f)
+
+                if r_final < length(B)
+                    if sdp.config.verbose
+                        println("  Column rank r_final = $r_final < length(B) = $(length(B)). Reconciling rows...")
+                    end
+                    D_sub2 = sparse(copy(sdp.D[B, :]'))
+                    for col in 1:length(B)
+                        s = 0.0
+                        for ptr in nzrange(D_sub2, col)
+                            s = hypot(s, D_sub2.nzval[ptr])
+                        end
+                        if s > 0.0
+                            for ptr in nzrange(D_sub2, col)
+                                D_sub2.nzval[ptr] /= s
+                            end
+                        end
+                    end
+                    F_r = qr(D_sub2)
+                    d_r = abs.(diag(F_r.R))
+                    max_dr = isempty(d_r) ? 1.0 : maximum(d_r)
+                    tol_r = max(eps(Float64) * max(size(D_sub2)...) * max_dr, sdp.config.cond_tol * max_dr)
+                    nz_r = findall(>(tol_r), d_r)
+                    B = B[(F_r.pcol::Vector{Int})[nz_r[1:r_final]]]
+                end
+                p = r_final
+            end
 
             in_B = falses(m)
             in_B[B] .= true
