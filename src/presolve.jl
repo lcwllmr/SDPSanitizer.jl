@@ -273,36 +273,29 @@ function presolve!(sdp::SemidefiniteProgram)
                 sdp.f = sparse(sdp.f[C])
                 f_indep = Vector(sdp.f)
 
-                # Reconcile rows: D_sub_T has kc rows and length(B) columns
-                D_sub_T = sparse(sdp.D[B, :]')
-                for col in 1:length(B)
-                    s = 0.0
-                    for ptr in nzrange(D_sub_T, col)
-                        s = hypot(s, D_sub_T.nzval[ptr])
-                    end
-                    if s > 0.0
+                if kc < length(B)
+                    # Reconcile rows: D_sub_T has kc rows and length(B) columns
+                    D_sub_T = sparse(sdp.D[B, :]')
+                    for col in 1:length(B)
+                        s = 0.0
                         for ptr in nzrange(D_sub_T, col)
-                            D_sub_T.nzval[ptr] /= s
+                            s = hypot(s, D_sub_T.nzval[ptr])
+                        end
+                        if s > 0.0
+                            for ptr in nzrange(D_sub_T, col)
+                                D_sub_T.nzval[ptr] /= s
+                            end
                         end
                     end
+                    F_r = qr(D_sub_T)
+                    diag_Rr = abs.(diag(F_r.R))
+                    max_dr = isempty(diag_Rr) ? 1.0 : maximum(diag_Rr)
+                    if sdp.config.verbose
+                        println("  F_r pivots: min = $(minimum(diag_Rr)), max = $max_dr, rank kc = $kc out of $(length(B))")
+                    end
+                    B = B[(F_r.pcol::Vector{Int})[1:kc]]
                 end
-                F_r = qr(D_sub_T)
-                diag_Rr = abs.(diag(F_r.R))
-                max_dr = isempty(diag_Rr) ? 1.0 : maximum(diag_Rr)
-                tol_r = max(eps(Float64) * max(size(D_sub_T)...) * max_dr, 1e-12)
-                kr = count(>(tol_r), diag_Rr)
-                if sdp.config.verbose
-                    println("  F_r pivots: min = $(minimum(diag_Rr)), max = $max_dr, rank kr = $kr out of $(length(B))")
-                end
-                k_final = min(kc, kr)
-                B = B[(F_r.pcol::Vector{Int})[1:k_final]]
-                if k_final < kc
-                    independent_cols = independent_cols[1:k_final]
-                    sdp.D = sdp.D[:, 1:k_final]
-                    sdp.f = sparse(sdp.f[1:k_final])
-                    f_indep = Vector(sdp.f)
-                end
-                p = k_final
+                p = kc
             end
 
             in_B = falses(m)
@@ -362,17 +355,72 @@ function presolve!(sdp::SemidefiniteProgram)
             end
 
             @time_if sdp.config.verbose raw_lu = lu(D_B_equil; check=false)
+
+            max_retries = 5
+            retry_count = 0
+            while !issuccess(raw_lu) && retry_count < max_retries && p > 1
+                retry_count += 1
+                U_diag = abs.(diag(raw_lu.U))
+                zero_pivots = findall(==(0.0), U_diag)
+                zp = isempty(zero_pivots) ? length(U_diag) : zero_pivots[1]
+                row_idx = raw_lu.p[zp]
+                col_idx = raw_lu.q[zp]
+                if sdp.config.verbose
+                    println("  [LU Auto-Recovery] Drop singular row $(B[row_idx]) and col $(independent_cols[col_idx]) (zero pivot $retry_count/$(max_retries) at U[$zp,$zp])...")
+                end
+                keep_rows = [i for i in 1:length(B) if i != row_idx]
+                keep_cols = [j for j in 1:p if j != col_idx]
+                B = B[keep_rows]
+                independent_cols = independent_cols[keep_cols]
+                sdp.D = sdp.D[:, keep_cols]
+                sdp.f = sparse(sdp.f[keep_cols])
+                f_indep = Vector(sdp.f)
+                p = length(keep_cols)
+
+                in_B = falses(m)
+                in_B[B] .= true
+                N = findall(!, in_B)
+
+                D_B_raw = sdp.D[B, :]
+                c_scale = zeros(Float64, p)
+                for j in 1:p
+                    cmax = 0.0
+                    for ptr in nzrange(D_B_raw, j)
+                        v = abs(D_B_raw.nzval[ptr])
+                        if v > cmax
+                            cmax = v
+                        end
+                    end
+                    c_scale[j] = cmax > 0.0 ? 1.0 / cmax : 1.0
+                end
+                r_scale = zeros(Float64, length(B))
+                for j in 1:p
+                    cj = c_scale[j]
+                    for ptr in nzrange(D_B_raw, j)
+                        row = D_B_raw.rowval[ptr]
+                        v = abs(D_B_raw.nzval[ptr]) * cj
+                        if v > r_scale[row]
+                            r_scale[row] = v
+                        end
+                    end
+                end
+                for i in 1:length(r_scale)
+                    r_scale[i] = r_scale[i] > 0.0 ? 1.0 / r_scale[i] : 1.0
+                end
+                D_B_equil = copy(D_B_raw)
+                for j in 1:p
+                    cj = c_scale[j]
+                    for ptr in nzrange(D_B_equil, j)
+                        row = D_B_equil.rowval[ptr]
+                        D_B_equil.nzval[ptr] *= (r_scale[row] * cj)
+                    end
+                end
+                raw_lu = lu(D_B_equil; check=false)
+            end
+
             if !issuccess(raw_lu)
                 U_diag = abs.(diag(raw_lu.U))
                 println("  [LU Alert] issuccess is false! nnz = $(nnz(D_B_equil)), zero pivots = $(count(==(0.0), U_diag))")
-                zero_pivots = findall(==(0.0), U_diag)
-                println("  Zero pivot positions in U: ", zero_pivots)
-                for zp in zero_pivots[1:min(5, length(zero_pivots))]
-                    row_idx = raw_lu.p[zp]
-                    col_idx = raw_lu.q[zp]
-                    println("    zp $zp: row $row_idx (orig row $(B[row_idx])), col $col_idx (orig affine var $(independent_cols[col_idx]))")
-                    println("    nnz in row: $(count(!iszero, D_B_equil[row_idx, :])), nnz in col: $(count(!iszero, D_B_equil[:, col_idx]))")
-                end
                 error("LinearAlgebra.SingularException: D_B is singular (zero pivots: $(count(==(0.0), U_diag)))")
             end
             if sdp.config.verbose
