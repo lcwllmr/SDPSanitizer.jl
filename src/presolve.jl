@@ -183,6 +183,7 @@ function presolve!(sdp::SemidefiniteProgram)
             println("Affine constraint matrix D has rank $p_rank out of $p columns.")
             if !isempty(diag_R1)
                 println("  R1 pivots: min = $(minimum(diag_R1)), max = $max_diag1, tol1 = $tol1")
+                println("  R1 lowest pivots: ", sort(diag_R1)[1:min(20, length(diag_R1))])
             end
         end
 
@@ -212,8 +213,8 @@ function presolve!(sdp::SemidefiniteProgram)
             if sdp.config.verbose
                 println("Stage 1 - Step 2: Performing QR to extract row space basis of affine constraint matrix D...")
             end
-            # Transpose D so columns correspond to rows of D
-            DT = sparse(sdp.D')
+            # Transpose D_col_scaled so columns correspond to rows of column-normalized D
+            DT = sparse(D_col_scaled')
             # Normalize each column of Dᵀ (row of D) so column-pivoted QR treats all rows equitably
             for col in 1:m
                 s = 0.0
@@ -232,6 +233,10 @@ function presolve!(sdp::SemidefiniteProgram)
             max_diag2 = isempty(diag_R2) ? 1.0 : maximum(diag_R2)
             tol2 = max(eps(Float64) * max(m, p) * max_diag2, sdp.config.cond_tol * max_diag2)
             nzdiag2 = findall(>(tol2), diag_R2)
+            if sdp.config.verbose && !isempty(diag_R2)
+                println("  R2 pivots: min = $(minimum(diag_R2)), max = $max_diag2, tol2 = $tol2")
+                println("  R2 lowest pivots: ", sort(diag_R2)[1:min(20, length(diag_R2))])
+            end
             pcol2 = F2.pcol::Vector{Int}
             r = min(p, length(nzdiag2))
             B = pcol2[nzdiag2[1:r]]
@@ -240,7 +245,7 @@ function presolve!(sdp::SemidefiniteProgram)
 
             if r < p
                 if sdp.config.verbose
-                    println("  Row rank r = $r < p = $p. Reconciling columns via QR on basis slice D[B, :]...")
+                    println("  Row rank r = $r < p = $p. Reconciling columns and rows...")
                 end
                 D_B_rect = copy(sdp.D[B, :])
                 for col in 1:p
@@ -255,44 +260,49 @@ function presolve!(sdp::SemidefiniteProgram)
                     end
                 end
                 F_c = qr(D_B_rect)
-                d_c = abs.(diag(F_c.R))
-                max_dc = isempty(d_c) ? 1.0 : maximum(d_c)
-                tol_c = max(eps(Float64) * max(size(D_B_rect)...) * max_dc, sdp.config.cond_tol * max_dc)
-                nz_c = findall(>(tol_c), d_c)
-                r_final = length(nz_c)
+                diag_Rc = abs.(diag(F_c.R))
+                max_dc = isempty(diag_Rc) ? 1.0 : maximum(diag_Rc)
+                tol_c = max(eps(Float64) * max(size(D_B_rect)...) * max_dc, 1e-12)
+                kc = count(>(tol_c), diag_Rc)
                 if sdp.config.verbose
-                    println("  F_c pivots: min = $(minimum(d_c)), max = $max_dc, valid r_final = $r_final (dropped $(p - r_final) cols)")
+                    println("  F_c pivots: min = $(minimum(diag_Rc)), max = $max_dc, rank kc = $kc out of $p")
                 end
-                C = (F_c.pcol::Vector{Int})[nz_c]
+                C = (F_c.pcol::Vector{Int})[1:kc]
                 independent_cols = independent_cols[C]
                 sdp.D = sdp.D[:, C]
                 sdp.f = sparse(sdp.f[C])
                 f_indep = Vector(sdp.f)
 
-                if r_final < length(B)
-                    if sdp.config.verbose
-                        println("  Column rank r_final = $r_final < length(B) = $(length(B)). Reconciling rows...")
+                # Reconcile rows: D_sub_T has kc rows and length(B) columns
+                D_sub_T = sparse(sdp.D[B, :]')
+                for col in 1:length(B)
+                    s = 0.0
+                    for ptr in nzrange(D_sub_T, col)
+                        s = hypot(s, D_sub_T.nzval[ptr])
                     end
-                    D_sub2 = sparse(copy(sdp.D[B, :]'))
-                    for col in 1:length(B)
-                        s = 0.0
-                        for ptr in nzrange(D_sub2, col)
-                            s = hypot(s, D_sub2.nzval[ptr])
-                        end
-                        if s > 0.0
-                            for ptr in nzrange(D_sub2, col)
-                                D_sub2.nzval[ptr] /= s
-                            end
+                    if s > 0.0
+                        for ptr in nzrange(D_sub_T, col)
+                            D_sub_T.nzval[ptr] /= s
                         end
                     end
-                    F_r = qr(D_sub2)
-                    d_r = abs.(diag(F_r.R))
-                    max_dr = isempty(d_r) ? 1.0 : maximum(d_r)
-                    tol_r = max(eps(Float64) * max(size(D_sub2)...) * max_dr, sdp.config.cond_tol * max_dr)
-                    nz_r = findall(>(tol_r), d_r)
-                    B = B[(F_r.pcol::Vector{Int})[nz_r[1:r_final]]]
                 end
-                p = r_final
+                F_r = qr(D_sub_T)
+                diag_Rr = abs.(diag(F_r.R))
+                max_dr = isempty(diag_Rr) ? 1.0 : maximum(diag_Rr)
+                tol_r = max(eps(Float64) * max(size(D_sub_T)...) * max_dr, 1e-12)
+                kr = count(>(tol_r), diag_Rr)
+                if sdp.config.verbose
+                    println("  F_r pivots: min = $(minimum(diag_Rr)), max = $max_dr, rank kr = $kr out of $(length(B))")
+                end
+                k_final = min(kc, kr)
+                B = B[(F_r.pcol::Vector{Int})[1:k_final]]
+                if k_final < kc
+                    independent_cols = independent_cols[1:k_final]
+                    sdp.D = sdp.D[:, 1:k_final]
+                    sdp.f = sparse(sdp.f[1:k_final])
+                    f_indep = Vector(sdp.f)
+                end
+                p = k_final
             end
 
             in_B = falses(m)
@@ -351,7 +361,20 @@ function presolve!(sdp::SemidefiniteProgram)
                 end
             end
 
-            @time_if sdp.config.verbose raw_lu = lu(D_B_equil)
+            @time_if sdp.config.verbose raw_lu = lu(D_B_equil; check=false)
+            if !issuccess(raw_lu)
+                U_diag = abs.(diag(raw_lu.U))
+                println("  [LU Alert] issuccess is false! nnz = $(nnz(D_B_equil)), zero pivots = $(count(==(0.0), U_diag))")
+                zero_pivots = findall(==(0.0), U_diag)
+                println("  Zero pivot positions in U: ", zero_pivots)
+                for zp in zero_pivots[1:min(5, length(zero_pivots))]
+                    row_idx = raw_lu.p[zp]
+                    col_idx = raw_lu.q[zp]
+                    println("    zp $zp: row $row_idx (orig row $(B[row_idx])), col $col_idx (orig affine var $(independent_cols[col_idx]))")
+                    println("    nnz in row: $(count(!iszero, D_B_equil[row_idx, :])), nnz in col: $(count(!iszero, D_B_equil[:, col_idx]))")
+                end
+                error("LinearAlgebra.SingularException: D_B is singular (zero pivots: $(count(==(0.0), U_diag)))")
+            end
             if sdp.config.verbose
                 U_diag = abs.(diag(raw_lu.U))
                 min_u = isempty(U_diag) ? 1.0 : minimum(U_diag)

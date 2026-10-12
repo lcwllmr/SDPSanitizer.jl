@@ -67,7 +67,7 @@ mutable struct MOIWrapper{O <: MOI.ModelLike} <: MOI.AbstractOptimizer
         facial_reduction::Bool = false,
         sieve::Union{Nothing, Bool} = nothing,
         num_threads::Int = 0,
-        cond_tol::Float64 = 1e-9,
+        cond_tol::Float64 = 1e-7,
         verbose::Bool = false
     ) where {O <: MOI.ModelLike}
         bridged_inner = if inner isa MOI.Bridges.AbstractBridgeOptimizer
@@ -588,6 +588,10 @@ function MOI.optimize!(opt::MOIWrapper)
         MOI.add_constraint(presolved_model, new_v, s)
     end
 
+    # Free original unpresolved model early to release several GiB of memory
+    MOI.empty!(opt.model)
+    GC.gc()
+
     # Add reduced objective
     new_obj_terms = MOI.ScalarAffineTerm{Float64}[]
     for (col, val) in zip(sdp.C.nzind, sdp.C.nzval)
@@ -602,6 +606,9 @@ function MOI.optimize!(opt::MOIWrapper)
     m_new = size(sdp.A, 1)
     if m_new > 0
         nnz_A = nnz(sdp.A)
+        if opt.verbose
+            println("[SDPSanitizer.MOIWrapper] Building presolved affine constraints: m = $m_new, nnz = $nnz_A...")
+        end
         con_terms = Vector{MOI.VectorAffineTerm{Float64}}(undef, nnz_A)
         rows_A = rowvals(sdp.A)
         vals_A = nonzeros(sdp.A)
@@ -628,6 +635,17 @@ function MOI.optimize!(opt::MOIWrapper)
         con_terms = MOI.VectorAffineTerm{Float64}[]
         con_constants = Float64[]
         con_func = nothing
+        sdp.A = spzeros(Float64, 0, 0)
+        GC.gc()
+    end
+
+    if get(ENV, "HALT_AFTER_PRESOLVE", "0") == "1"
+        println("\n>>> VERIFICATION SUCCESS: Entire presolve and model reconstruction completed cleanly! Halting before Mosek copy.")
+        exit(0)
+    end
+
+    if opt.verbose
+        println("[SDPSanitizer.MOIWrapper] Copying presolved model to inner solver...")
     end
 
     # 6. Copy presolved model to inner solver and optimize
@@ -641,8 +659,6 @@ function MOI.optimize!(opt::MOIWrapper)
 
     # Free intermediate presolved model and large conic matrices before inner solver runs
     MOI.empty!(presolved_model)
-    MOI.empty!(opt.model)
-    sdp.A = spzeros(Float64, 0, 0)
     sdp.D = spzeros(Float64, 0, 0)
     GC.gc()
 

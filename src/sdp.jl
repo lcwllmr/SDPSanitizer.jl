@@ -14,7 +14,7 @@ Base.@kwdef mutable struct SanitizerConfig
     eliminate_free_variables::Bool = true
     eliminate_redundant_constraints::Bool = false
     num_threads::Int = 0
-    cond_tol::Float64 = 1e-9
+    cond_tol::Float64 = 1e-7
 end
 
 """
