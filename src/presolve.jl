@@ -213,21 +213,31 @@ function presolve!(sdp::SemidefiniteProgram)
             if sdp.config.verbose
                 println("Stage 1 - Step 2: Performing QR to extract row space basis of affine constraint matrix D...")
             end
-            # Transpose D_col_scaled so columns correspond to rows of column-normalized D
-            DT = sparse(D_col_scaled')
-            # Normalize each column of Dᵀ (row of D) so column-pivoted QR treats all rows equitably
-            for col in 1:m
-                s = 0.0
-                for ptr in nzrange(DT, col)
-                    s = hypot(s, DT.nzval[ptr])
+            # Filter out tiny entries (< 1e-3 * cmax) relative to each column's max magnitude
+            # so COLAMD cannot choose O(1) singleton rows as pivots when the same column has
+            # O(1e5) low-impedance entries, and so near-syzygy columns that would amplify A by >1e5x are pruned.
+            D_piv = copy(sdp.D)
+            for j in 1:p
+                cmax = 0.0
+                for ptr in nzrange(D_piv, j)
+                    v = abs(D_piv.nzval[ptr])
+                    if v > cmax
+                        cmax = v
+                    end
                 end
-                if s > 0.0
-                    for ptr in nzrange(DT, col)
-                        DT.nzval[ptr] /= s
+                if cmax > 0.0
+                    thresh = 1e-3 * cmax
+                    for ptr in nzrange(D_piv, j)
+                        if abs(D_piv.nzval[ptr]) < thresh
+                            D_piv.nzval[ptr] = 0.0
+                        else
+                            D_piv.nzval[ptr] /= cmax
+                        end
                     end
                 end
             end
-            @time_if sdp.config.verbose F2 = qr(DT)
+            dropzeros!(D_piv)
+            @time_if sdp.config.verbose F2 = qr(sparse(D_piv'))
             R2 = F2.R::SparseMatrixCSC{Float64, Int}
             diag_R2 = abs.(diag(R2))
             max_diag2 = isempty(diag_R2) ? 1.0 : maximum(diag_R2)
@@ -240,7 +250,7 @@ function presolve!(sdp::SemidefiniteProgram)
             pcol2 = F2.pcol::Vector{Int}
             r = min(p, length(nzdiag2))
             B = pcol2[nzdiag2[1:r]]
-            DT = spzeros(Float64, 0, 0)
+            D_piv = spzeros(Float64, 0, 0)
             D_col_scaled = spzeros(Float64, 0, 0)
 
             if r < p
